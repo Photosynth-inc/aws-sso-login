@@ -54,24 +54,22 @@ func main() {
 				Aliases: []string{"y"},
 				Usage:   "Skip confirmation prompts",
 			},
+			&cli.StringFlag{
+				Name:    "profile",
+				Aliases: []string{"p"},
+				Usage:   "AWS profile name",
+			},
+			&cli.BoolFlag{
+				Name:    "read-only",
+				Aliases: []string{"ro"},
+				Usage:   "Use ReadOnly profile (auto-select -ro suffix)",
+			},
 		},
 		Commands: []*cli.Command{
 			{
 				Name:   "login",
 				Usage:  "Login to AWS SSO interactively",
 				Action: handleLogin,
-				Flags: []cli.Flag{
-					&cli.StringFlag{
-						Name:    "profile",
-						Aliases: []string{"p"},
-						Usage:   "AWS profile name",
-					},
-					&cli.BoolFlag{
-						Name:    "read-only",
-						Aliases: []string{"ro"},
-						Usage:   "Use ReadOnly profile (auto-select -ro suffix)",
-					},
-				},
 			},
 			{
 				Name:    "sync",
@@ -123,13 +121,6 @@ func main() {
 				Name:   "status",
 				Usage:  "Show session status",
 				Action: handleStatus,
-				Flags: []cli.Flag{
-					&cli.StringFlag{
-						Name:    "profile",
-						Aliases: []string{"p"},
-						Usage:   "AWS profile name (default: current AWS_PROFILE)",
-					},
-				},
 			},
 		},
 		Action: handleDefault,

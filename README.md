@@ -12,6 +12,10 @@ Interactive AWS SSO (Identity Center) login CLI with automatic profile generatio
 ## Installation
 
 ```bash
+# Homebrew
+brew install Photosynth-inc/tap/aws-sso-login
+
+# Go
 go install github.com/Photosynth-inc/aws-sso-login/cmd/aws-sso-login@latest
 ```
 
