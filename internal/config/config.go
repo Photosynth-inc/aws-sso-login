@@ -10,23 +10,23 @@ import (
 
 // Profile represents an AWS profile configuration
 type Profile struct {
-	Name           string
-	SSOSession     string
-	SSOAccountID   string
-	SSORoleName    string
-	SSOStartURL    string
-	SSORegion      string
-	Region         string
-	Output         string
-	IsSSO          bool
+	Name         string
+	SSOSession   string
+	SSOAccountID string
+	SSORoleName  string
+	SSOStartURL  string
+	SSORegion    string
+	Region       string
+	Output       string
+	IsSSO        bool
 }
 
 // SSOSession represents an SSO session configuration
 type SSOSession struct {
-	Name       string
-	StartURL   string
-	Region     string
-	Scopes     string
+	Name     string
+	StartURL string
+	Region   string
+	Scopes   string
 }
 
 // Config represents AWS configuration

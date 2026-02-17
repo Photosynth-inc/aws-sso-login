@@ -11,11 +11,11 @@ import (
 
 // CachedToken represents a cached SSO token
 type CachedToken struct {
-	AccessToken  string    `json:"accessToken"`
-	ExpiresAt    time.Time `json:"expiresAt"`
-	StartURL     string    `json:"startUrl"`
-	Region       string    `json:"region"`
-	FilePath     string    `json:"-"`
+	AccessToken string    `json:"accessToken"`
+	ExpiresAt   time.Time `json:"expiresAt"`
+	StartURL    string    `json:"startUrl"`
+	Region      string    `json:"region"`
+	FilePath    string    `json:"-"`
 }
 
 // GetLatestToken retrieves the latest valid SSO token from cache

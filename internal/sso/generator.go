@@ -18,21 +18,21 @@ type Account struct {
 
 // Role represents an IAM role from Identity Center
 type Role struct {
-	RoleName    string `json:"roleName"`
-	AccountID   string `json:"accountId"`
+	RoleName  string `json:"roleName"`
+	AccountID string `json:"accountId"`
 }
 
 // ProfileTemplate represents a profile to be generated
 type ProfileTemplate struct {
-	Name         string
-	AccountID    string
-	AccountName  string
-	RoleName     string
-	SSOSession   string
-	SSOStartURL  string
-	SSORegion    string
-	Region       string
-	Output       string
+	Name        string
+	AccountID   string
+	AccountName string
+	RoleName    string
+	SSOSession  string
+	SSOStartURL string
+	SSORegion   string
+	Region      string
+	Output      string
 }
 
 // Generator generates AWS profiles from Identity Center
