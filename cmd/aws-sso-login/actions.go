@@ -209,6 +209,10 @@ func handleSync(ctx context.Context, c *cli.Command) error {
 	if err != nil {
 		token, err = sso.GetLatestToken()
 		if err != nil {
+			// In --json mode, never trigger interactive browser login
+			if opts.JSON {
+				return fmt.Errorf("no valid SSO session found. Run 'aws-sso-login login' first")
+			}
 			logInfo("No valid SSO session found. Starting SSO login...")
 			if loginErr := sso.RunSSOLogin(ctx, ssoStartURL, ssoRegion); loginErr != nil {
 				return fmt.Errorf("SSO login failed: %w", loginErr)
@@ -379,7 +383,7 @@ func handleStatus(ctx context.Context, c *cli.Command) error {
 			return err
 		}
 		if !status.Valid {
-			return &ExitError{Code: exitCodeInvalidSession, Err: fmt.Errorf("session is invalid or expired")}
+			return &ExitError{Code: exitCodeInvalidSession, Err: fmt.Errorf("session is invalid or expired"), Silent: true}
 		}
 		return nil
 	}

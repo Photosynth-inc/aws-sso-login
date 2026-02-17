@@ -35,8 +35,7 @@ func saveProfilesNonInteractive(profiles []sso.ProfileTemplate, output string, w
 		return nil
 
 	case "backup-replace":
-		existingConfig, _ := config.Load()
-		if err := backupAndReplace(configPath, existingConfig, output); err != nil {
+		if err := backupAndReplace(configPath, output); err != nil {
 			return err
 		}
 		if opts.JSON {
@@ -84,7 +83,7 @@ func saveProfilesInteractive(profiles []sso.ProfileTemplate, output string, opts
 	case "append":
 		return appendToConfig(configPath, output)
 	case "backup-replace":
-		return backupAndReplace(configPath, existingConfig, output)
+		return backupAndReplace(configPath, output)
 	case "cancel":
 		fmt.Println("Cancelled. No changes made.")
 		return nil
@@ -171,31 +170,26 @@ func appendToConfig(configPath, content string) error {
 	return nil
 }
 
-func backupAndReplace(configPath string, existingConfig *config.Config, newContent string) error {
+func backupAndReplace(configPath string, newContent string) error {
 	backupPath := configPath + ".backup-" + time.Now().Format("20060102-150405")
 
-	if _, err := os.Stat(configPath); err == nil {
-		input, err := os.ReadFile(configPath)
-		if err != nil {
-			return fmt.Errorf("failed to read existing config: %w", err)
-		}
-		if err := os.WriteFile(backupPath, input, 0644); err != nil {
+	// Read raw file content (independent of config.Load parsing)
+	var original []byte
+	if b, err := os.ReadFile(configPath); err == nil {
+		original = b
+		if err := os.WriteFile(backupPath, b, 0644); err != nil {
 			return fmt.Errorf("failed to create backup: %w", err)
 		}
 		logInfo("✓ Backup saved to %s", backupPath)
 	}
 
-	// Preserve non-SSO profiles from existing config
+	// Preserve non-SSO profiles directly from raw text
 	var preserved strings.Builder
-	if existingConfig != nil {
-		originalContent, err := os.ReadFile(configPath)
-		if err == nil {
-			nonSSOSections := extractNonSSOSections(string(originalContent))
-			if nonSSOSections != "" {
-				preserved.WriteString("# Preserved non-SSO profiles\n")
-				preserved.WriteString(nonSSOSections)
-				preserved.WriteString("\n")
-			}
+	if len(original) > 0 {
+		if nonSSO := extractNonSSOSections(string(original)); nonSSO != "" {
+			preserved.WriteString("# Preserved non-SSO profiles\n")
+			preserved.WriteString(nonSSO)
+			preserved.WriteString("\n")
 		}
 	}
 

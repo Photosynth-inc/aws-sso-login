@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 
@@ -135,9 +136,11 @@ func main() {
 	}
 
 	if err := cmd.Run(ctx, os.Args); err != nil {
-		// ExitError carries a specific exit code (e.g. status invalid=3)
-		if exitErr, ok := err.(*ExitError); ok {
-			fmt.Fprintf(os.Stderr, "Error: %v\n", exitErr.Err)
+		var exitErr *ExitError
+		if errors.As(err, &exitErr) {
+			if !exitErr.Silent {
+				fmt.Fprintf(os.Stderr, "Error: %v\n", exitErr.Err)
+			}
 			os.Exit(exitErr.Code)
 		}
 		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
@@ -145,10 +148,12 @@ func main() {
 	}
 }
 
-// ExitError allows commands to return a specific exit code
+// ExitError allows commands to return a specific exit code.
+// Set Silent=true to suppress stderr output (useful for --json where exit code alone is sufficient).
 type ExitError struct {
-	Code int
-	Err  error
+	Code   int
+	Err    error
+	Silent bool
 }
 
 func (e *ExitError) Error() string { return e.Err.Error() }
