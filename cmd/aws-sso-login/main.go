@@ -51,7 +51,7 @@ func main() {
 					},
 					&cli.StringFlag{
 						Name:  "sso-start-url",
-						Usage: "SSO start URL",
+						Usage: "SSO start URL (e.g., https://your-domain.awsapps.com/start/)",
 					},
 					&cli.StringFlag{
 						Name:  "sso-region",

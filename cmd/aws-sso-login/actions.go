@@ -155,7 +155,7 @@ func handleGenerate(ctx context.Context, c *cli.Command) error {
 	}
 
 	if ssoStartURL == "" {
-		return fmt.Errorf("--sso-start-url is required (e.g., https://ap-photosynth.awsapps.com/start/)")
+		return fmt.Errorf("--sso-start-url is required (e.g., https://your-domain.awsapps.com/start/)")
 	}
 
 	// Get SSO token from cache
@@ -210,11 +210,8 @@ func handleGenerate(ctx context.Context, c *cli.Command) error {
 		return nil
 	}
 
-	// TODO: Implement saving to ~/.aws/config
-	fmt.Println(output)
-	fmt.Printf("\nTo save these profiles, append them to ~/.aws/config\n")
-
-	return nil
+	// Interactive save flow
+	return saveProfiles(profiles, output)
 }
 
 func handleList(ctx context.Context, c *cli.Command) error {

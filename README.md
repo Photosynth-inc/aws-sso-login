@@ -40,25 +40,23 @@ aws-sso-login --read-only
 Generate Admin and/or ReadOnly profiles from Identity Center:
 
 ```bash
-# First, login to SSO to get access token
-aws sso login --sso-session photosynth
-
-# Generate Admin + ReadOnly profiles (recommended)
+# Preview generated profiles (dry-run)
 aws-sso-login generate --mode dual --dry-run
 
-# Generate Admin profiles only
-aws-sso-login generate --mode admin --dry-run
+# Generate and save interactively (append or backup & replace)
+aws-sso-login generate --mode dual
 
-# Generate ReadOnly profiles only
-aws-sso-login generate --mode readonly --dry-run
-
-# Save to file
-aws-sso-login generate --mode dual > generated-profiles.ini
-
-# Append to ~/.aws/config (backup first!)
-cp ~/.aws/config ~/.aws/config.backup
-aws-sso-login generate --mode dual >> ~/.aws/config
+# First-time setup (SSO start URL required)
+aws-sso-login generate --sso-start-url https://your-domain.awsapps.com/start/
 ```
+
+If no valid SSO session exists, the tool will automatically start the login flow.
+
+When saving without `--dry-run`, you'll be prompted to choose:
+- **Append** - Add profiles to the end of `~/.aws/config`
+- **Backup & Replace** - Back up the current config and write a fresh file
+
+Duplicate profile names are detected and warned before saving.
 
 **Options:**
 - `--mode`: `admin`, `readonly`, or `dual` (default: `dual`)
