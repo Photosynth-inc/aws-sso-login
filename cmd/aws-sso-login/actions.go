@@ -133,7 +133,76 @@ func selectProfileInteractive(profiles []*config.Profile) (*config.Profile, erro
 }
 
 func handleGenerate(ctx context.Context, c *cli.Command) error {
-	return fmt.Errorf("not implemented yet")
+	mode := c.String("mode")
+	if mode != "admin" && mode != "readonly" && mode != "dual" {
+		return fmt.Errorf("invalid mode: %s (must be admin, readonly, or dual)", mode)
+	}
+
+	ssoStartURL := c.String("sso-start-url")
+	ssoRegion := c.String("sso-region")
+	defaultRegion := c.String("default-region")
+
+	// If SSO start URL is not provided, try to detect from existing config
+	if ssoStartURL == "" {
+		cfg, err := config.Load()
+		if err == nil {
+			for _, p := range cfg.Profiles {
+				if p.SSOStartURL != "" {
+					ssoStartURL = p.SSOStartURL
+					fmt.Printf("Using SSO start URL from existing config: %s\n", ssoStartURL)
+					break
+				}
+			}
+		}
+	}
+
+	if ssoStartURL == "" {
+		return fmt.Errorf("--sso-start-url is required (e.g., https://ap-photosynth.awsapps.com/start/)")
+	}
+
+	// Get SSO token from cache
+	var token *sso.CachedToken
+	var err error
+
+	token, err = sso.GetTokenForStartURL(ssoStartURL)
+	if err != nil {
+		// Try to get latest token
+		token, err = sso.GetLatestToken()
+		if err != nil {
+			return fmt.Errorf("failed to get SSO token: %w\n\nPlease run 'aws sso login' first", err)
+		}
+		fmt.Printf("Warning: Using token for %s instead of %s\n", token.StartURL, ssoStartURL)
+	}
+
+	fmt.Printf("Using SSO token (expires: %s)\n", token.ExpiresAt.Format("2006-01-02 15:04:05"))
+
+	// Create generator
+	generator := sso.NewGenerator(ssoStartURL, ssoRegion, defaultRegion)
+	generator.SetAccessToken(token.AccessToken)
+
+	// Generate profiles
+	fmt.Printf("Fetching accounts from Identity Center...\n")
+	profiles, err := generator.GenerateProfiles(ctx, mode)
+	if err != nil {
+		return fmt.Errorf("failed to generate profiles: %w", err)
+	}
+
+	fmt.Printf("\nGenerated %d profiles:\n\n", len(profiles))
+
+	// Format as INI
+	output := sso.FormatAsINI(profiles)
+
+	if c.Bool("dry-run") {
+		fmt.Println(output)
+		fmt.Printf("\nDry-run mode: profiles not saved\n")
+		return nil
+	}
+
+	// TODO: Implement saving to ~/.aws/config
+	fmt.Println(output)
+	fmt.Printf("\nTo save these profiles, append them to ~/.aws/config\n")
+
+	return nil
 }
 
 func handleList(ctx context.Context, c *cli.Command) error {
