@@ -2,11 +2,13 @@ package sso
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
-	"os/exec"
 	"sort"
 	"strings"
+
+	"github.com/aws/aws-sdk-go-v2/aws"
+	awsconfig "github.com/aws/aws-sdk-go-v2/config"
+	awssso "github.com/aws/aws-sdk-go-v2/service/sso"
 )
 
 // Account represents an AWS account from Identity Center
@@ -57,32 +59,47 @@ func (g *Generator) SetAccessToken(token string) {
 	g.accessToken = token
 }
 
+func (g *Generator) newSSOClient(ctx context.Context) (*awssso.Client, error) {
+	cfg, err := awsconfig.LoadDefaultConfig(ctx,
+		awsconfig.WithRegion(g.ssoRegion),
+		awsconfig.WithCredentialsProvider(aws.AnonymousCredentials{}),
+	)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create AWS config: %w", err)
+	}
+	return awssso.NewFromConfig(cfg), nil
+}
+
 // ListAccounts retrieves all accounts from Identity Center
 func (g *Generator) ListAccounts(ctx context.Context) ([]Account, error) {
 	if g.accessToken == "" {
 		return nil, fmt.Errorf("access token not set")
 	}
 
-	cmd := exec.CommandContext(ctx,
-		"aws", "sso", "list-accounts",
-		"--access-token", g.accessToken,
-		"--region", g.ssoRegion,
-	)
-
-	output, err := cmd.Output()
+	client, err := g.newSSOClient(ctx)
 	if err != nil {
-		return nil, fmt.Errorf("failed to list accounts: %w", err)
+		return nil, err
 	}
 
-	var result struct {
-		AccountList []Account `json:"accountList"`
+	var accounts []Account
+	paginator := awssso.NewListAccountsPaginator(client, &awssso.ListAccountsInput{
+		AccessToken: &g.accessToken,
+	})
+	for paginator.HasMorePages() {
+		page, err := paginator.NextPage(ctx)
+		if err != nil {
+			return nil, fmt.Errorf("failed to list accounts: %w", err)
+		}
+		for _, a := range page.AccountList {
+			accounts = append(accounts, Account{
+				AccountID:   aws.ToString(a.AccountId),
+				AccountName: aws.ToString(a.AccountName),
+				Email:       aws.ToString(a.EmailAddress),
+			})
+		}
 	}
 
-	if err := json.Unmarshal(output, &result); err != nil {
-		return nil, fmt.Errorf("failed to parse accounts: %w", err)
-	}
-
-	return result.AccountList, nil
+	return accounts, nil
 }
 
 // ListAccountRoles retrieves all roles for an account
@@ -91,27 +108,30 @@ func (g *Generator) ListAccountRoles(ctx context.Context, accountID string) ([]R
 		return nil, fmt.Errorf("access token not set")
 	}
 
-	cmd := exec.CommandContext(ctx,
-		"aws", "sso", "list-account-roles",
-		"--access-token", g.accessToken,
-		"--account-id", accountID,
-		"--region", g.ssoRegion,
-	)
-
-	output, err := cmd.Output()
+	client, err := g.newSSOClient(ctx)
 	if err != nil {
-		return nil, fmt.Errorf("failed to list roles for account %s: %w", accountID, err)
+		return nil, err
 	}
 
-	var result struct {
-		RoleList []Role `json:"roleList"`
+	var roles []Role
+	paginator := awssso.NewListAccountRolesPaginator(client, &awssso.ListAccountRolesInput{
+		AccessToken: &g.accessToken,
+		AccountId:   &accountID,
+	})
+	for paginator.HasMorePages() {
+		page, err := paginator.NextPage(ctx)
+		if err != nil {
+			return nil, fmt.Errorf("failed to list roles for account %s: %w", accountID, err)
+		}
+		for _, r := range page.RoleList {
+			roles = append(roles, Role{
+				RoleName:  aws.ToString(r.RoleName),
+				AccountID: aws.ToString(r.AccountId),
+			})
+		}
 	}
 
-	if err := json.Unmarshal(output, &result); err != nil {
-		return nil, fmt.Errorf("failed to parse roles: %w", err)
-	}
-
-	return result.RoleList, nil
+	return roles, nil
 }
 
 // GenerateProfiles generates profile templates based on mode
