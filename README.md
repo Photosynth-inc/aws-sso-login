@@ -17,37 +17,70 @@ go install github.com/Photosynth-inc/aws-sso-login/cmd/aws-sso-login@latest
 
 ## Usage
 
-### Interactive Login
+### 1. Interactive Login (Default)
+
+Choose AWS profile interactively with fuzzy search:
 
 ```bash
-# Select profile interactively
+# Interactive selection from all SSO profiles
 aws-sso-login
+
+# Or explicitly
+aws-sso-login login
 
 # Login with specific profile
 aws-sso-login --profile photosynth-dev-ro
+
+# Filter to ReadOnly profiles only
+aws-sso-login --read-only
 ```
 
-### Profile Generation
+### 2. Profile Generation
+
+Generate Admin and/or ReadOnly profiles from Identity Center:
 
 ```bash
-# Generate Admin + ReadOnly profiles from Identity Center
-aws-sso-login generate --mode dual
+# First, login to SSO to get access token
+aws sso login --sso-session photosynth
 
-# Preview generated profiles
+# Generate Admin + ReadOnly profiles (recommended)
 aws-sso-login generate --mode dual --dry-run
 
-# Apply generated profiles to ~/.aws/config
-aws-sso-login apply
+# Generate Admin profiles only
+aws-sso-login generate --mode admin --dry-run
+
+# Generate ReadOnly profiles only
+aws-sso-login generate --mode readonly --dry-run
+
+# Save to file
+aws-sso-login generate --mode dual > generated-profiles.ini
+
+# Append to ~/.aws/config (backup first!)
+cp ~/.aws/config ~/.aws/config.backup
+aws-sso-login generate --mode dual >> ~/.aws/config
 ```
 
-### Session Management
+**Options:**
+- `--mode`: `admin`, `readonly`, or `dual` (default: `dual`)
+- `--dry-run`: Preview without saving
+- `--sso-start-url`: SSO start URL (auto-detected from existing config)
+- `--sso-region`: SSO region (default: `ap-northeast-1`)
+- `--default-region`: Default AWS region (default: `ap-northeast-1`)
+
+### 3. Session Management
 
 ```bash
-# Check session status
+# Check session status for current profile (AWS_PROFILE)
 aws-sso-login status
+
+# Check specific profile
+aws-sso-login status --profile photosynth-dev-ro
 
 # List all profiles
 aws-sso-login list
+
+# List SSO profiles only
+aws-sso-login list --sso-only
 ```
 
 ## Configuration
