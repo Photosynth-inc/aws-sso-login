@@ -45,6 +45,11 @@ func GetLatestToken() (*CachedToken, error) {
 			continue
 		}
 
+		// Skip OIDC client registration files (no accessToken)
+		if token.AccessToken == "" {
+			continue
+		}
+
 		// Skip expired tokens
 		if time.Now().After(token.ExpiresAt) {
 			continue

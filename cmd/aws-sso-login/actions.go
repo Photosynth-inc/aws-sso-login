@@ -167,9 +167,23 @@ func handleGenerate(ctx context.Context, c *cli.Command) error {
 		// Try to get latest token
 		token, err = sso.GetLatestToken()
 		if err != nil {
-			return fmt.Errorf("failed to get SSO token: %w\n\nPlease run 'aws sso login' first", err)
+			// No valid token found - offer to login
+			fmt.Printf("No valid SSO session found. Starting SSO login...\n\n")
+			if loginErr := sso.RunSSOLogin(ctx, ssoStartURL, ssoRegion); loginErr != nil {
+				return fmt.Errorf("SSO login failed: %w", loginErr)
+			}
+
+			// Retry token retrieval after login
+			token, err = sso.GetTokenForStartURL(ssoStartURL)
+			if err != nil {
+				token, err = sso.GetLatestToken()
+				if err != nil {
+					return fmt.Errorf("failed to get SSO token after login: %w", err)
+				}
+			}
+		} else {
+			fmt.Printf("Warning: Using token for %s instead of %s\n", token.StartURL, ssoStartURL)
 		}
-		fmt.Printf("Warning: Using token for %s instead of %s\n", token.StartURL, ssoStartURL)
 	}
 
 	fmt.Printf("Using SSO token (expires: %s)\n", token.ExpiresAt.Format("2006-01-02 15:04:05"))
