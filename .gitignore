@@ -1,4 +1,5 @@
 # Binaries
+/aws-sso-login
 bin/
 dist/
 *.exe
