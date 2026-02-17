@@ -12,14 +12,50 @@ import (
 	"github.com/urfave/cli/v3"
 )
 
+// --- JSON result types ---
+
+type LoginResult struct {
+	Profile   string `json:"profile"`
+	AccountID string `json:"accountId"`
+	RoleName  string `json:"roleName"`
+}
+
+type ListResultEntry struct {
+	Name      string `json:"name"`
+	AccountID string `json:"accountId,omitempty"`
+	RoleName  string `json:"roleName,omitempty"`
+	IsSSO     bool   `json:"isSso"`
+}
+
+type StatusResult struct {
+	Profile   string `json:"profile"`
+	AccountID string `json:"accountId,omitempty"`
+	RoleName  string `json:"roleName,omitempty"`
+	Valid     bool   `json:"valid"`
+}
+
+type SyncResult struct {
+	ProfileCount int               `json:"profileCount"`
+	Profiles     []SyncProfileItem `json:"profiles"`
+	WriteMode    string            `json:"writeMode"`
+}
+
+type SyncProfileItem struct {
+	Name      string `json:"name"`
+	AccountID string `json:"accountId"`
+	RoleName  string `json:"roleName"`
+}
+
+// --- login ---
+
 func handleLogin(ctx context.Context, c *cli.Command) error {
-	// Load AWS config to get available profiles
+	opts := getGlobalOptions(c)
+
 	cfg, err := config.Load()
 	if err != nil {
 		return fmt.Errorf("failed to load AWS config: %w", err)
 	}
 
-	// Filter SSO profiles
 	ssoProfiles := cfg.GetSSOProfiles()
 	if len(ssoProfiles) == 0 {
 		return fmt.Errorf("no SSO profiles found in ~/.aws/config")
@@ -27,7 +63,6 @@ func handleLogin(ctx context.Context, c *cli.Command) error {
 
 	var selectedProfile *config.Profile
 
-	// If profile is specified, use it directly
 	if profileName := c.String("profile"); profileName != "" {
 		for _, p := range ssoProfiles {
 			if p.Name == profileName {
@@ -38,8 +73,9 @@ func handleLogin(ctx context.Context, c *cli.Command) error {
 		if selectedProfile == nil {
 			return fmt.Errorf("profile %q not found", profileName)
 		}
+	} else if opts.JSON {
+		return fmt.Errorf("--profile is required when using --json")
 	} else if c.Bool("read-only") {
-		// Filter ReadOnly profiles
 		roProfiles := make([]*config.Profile, 0)
 		for _, p := range ssoProfiles {
 			if strings.HasSuffix(p.Name, "-ro") {
@@ -54,17 +90,23 @@ func handleLogin(ctx context.Context, c *cli.Command) error {
 			return err
 		}
 	} else {
-		// Interactive selection
 		selectedProfile, err = selectProfileInteractive(ssoProfiles)
 		if err != nil {
 			return err
 		}
 	}
 
-	// Login to SSO
 	client := sso.NewClient()
 	if err := client.Login(ctx, selectedProfile); err != nil {
 		return fmt.Errorf("SSO login failed: %w", err)
+	}
+
+	if opts.JSON {
+		return emitJSON(LoginResult{
+			Profile:   selectedProfile.Name,
+			AccountID: selectedProfile.SSOAccountID,
+			RoleName:  selectedProfile.SSORoleName,
+		})
 	}
 
 	fmt.Printf("✓ Successfully logged in to profile: %s\n", selectedProfile.Name)
@@ -72,7 +114,6 @@ func handleLogin(ctx context.Context, c *cli.Command) error {
 	fmt.Printf("  Role: %s\n", selectedProfile.SSORoleName)
 	fmt.Printf("\nTo use this profile:\n")
 	fmt.Printf("  export AWS_PROFILE=%s\n", selectedProfile.Name)
-
 	return nil
 }
 
@@ -84,7 +125,6 @@ func selectProfileInteractive(profiles []*config.Profile) (*config.Profile, erro
 		Original  *config.Profile
 	}
 
-	// Calculate max widths for alignment
 	maxNameLen := 0
 	maxAccountLen := 0
 	for _, p := range profiles {
@@ -133,7 +173,11 @@ func selectProfileInteractive(profiles []*config.Profile) (*config.Profile, erro
 	return displayProfiles[index].Original, nil
 }
 
-func handleGenerate(ctx context.Context, c *cli.Command) error {
+// --- sync ---
+
+func handleSync(ctx context.Context, c *cli.Command) error {
+	opts := getGlobalOptions(c)
+
 	mode := c.String("mode")
 	if mode != "admin" && mode != "readonly" && mode != "dual" {
 		return fmt.Errorf("invalid mode: %s (must be admin, readonly, or dual)", mode)
@@ -143,13 +187,12 @@ func handleGenerate(ctx context.Context, c *cli.Command) error {
 	ssoRegion := c.String("sso-region")
 	defaultRegion := c.String("default-region")
 
-	// If SSO start URL is not provided, try to detect from existing config
 	if ssoStartURL == "" {
 		cfg, err := config.Load()
 		if err == nil {
 			ssoStartURL = cfg.GetSSOStartURL()
 			if ssoStartURL != "" {
-				fmt.Printf("Using SSO start URL from existing config: %s\n", ssoStartURL)
+				logInfo("Using SSO start URL from existing config: %s", ssoStartURL)
 			}
 		}
 	}
@@ -158,22 +201,22 @@ func handleGenerate(ctx context.Context, c *cli.Command) error {
 		return fmt.Errorf("--sso-start-url is required (e.g., https://your-domain.awsapps.com/start/)")
 	}
 
-	// Get SSO token from cache
+	// Resolve SSO token
 	var token *sso.CachedToken
 	var err error
 
 	token, err = sso.GetTokenForStartURL(ssoStartURL)
 	if err != nil {
-		// Try to get latest token
 		token, err = sso.GetLatestToken()
 		if err != nil {
-			// No valid token found - offer to login
-			fmt.Printf("No valid SSO session found. Starting SSO login...\n\n")
+			// In --json mode, never trigger interactive browser login
+			if opts.JSON {
+				return fmt.Errorf("no valid SSO session found. Run 'aws-sso-login login' first")
+			}
+			logInfo("No valid SSO session found. Starting SSO login...")
 			if loginErr := sso.RunSSOLogin(ctx, ssoStartURL, ssoRegion); loginErr != nil {
 				return fmt.Errorf("SSO login failed: %w", loginErr)
 			}
-
-			// Retry token retrieval after login
 			token, err = sso.GetTokenForStartURL(ssoStartURL)
 			if err != nil {
 				token, err = sso.GetLatestToken()
@@ -182,39 +225,69 @@ func handleGenerate(ctx context.Context, c *cli.Command) error {
 				}
 			}
 		} else {
-			fmt.Printf("Warning: Using token for %s instead of %s\n", token.StartURL, ssoStartURL)
+			logInfo("Warning: Using token for %s instead of %s", token.StartURL, ssoStartURL)
 		}
 	}
 
-	fmt.Printf("Using SSO token (expires: %s)\n", token.ExpiresAt.Format("2006-01-02 15:04:05"))
+	logInfo("Using SSO token (expires: %s)", token.ExpiresAt.Format("2006-01-02 15:04:05"))
 
-	// Create generator
 	generator := sso.NewGenerator(ssoStartURL, ssoRegion, defaultRegion)
 	generator.SetAccessToken(token.AccessToken)
 
-	// Generate profiles
-	fmt.Printf("Fetching accounts from Identity Center...\n")
+	logInfo("Fetching accounts from Identity Center...")
 	profiles, err := generator.GenerateProfiles(ctx, mode)
 	if err != nil {
-		return fmt.Errorf("failed to generate profiles: %w", err)
+		return fmt.Errorf("failed to sync profiles: %w", err)
 	}
 
-	fmt.Printf("\nGenerated %d profiles:\n\n", len(profiles))
+	logInfo("Synced %d profiles", len(profiles))
 
-	// Format as INI
 	output := sso.FormatAsINI(profiles)
 
 	if c.Bool("dry-run") {
+		if opts.JSON {
+			return emitJSON(buildSyncResult(profiles, "dry-run"))
+		}
 		fmt.Println(output)
 		fmt.Printf("\nDry-run mode: profiles not saved\n")
 		return nil
 	}
 
-	// Interactive save flow
-	return saveProfiles(profiles, output)
+	// Determine write-mode
+	writeMode := c.String("write-mode")
+
+	if opts.JSON && writeMode == "" {
+		writeMode = "stdout"
+	}
+
+	if writeMode != "" {
+		return saveProfilesNonInteractive(profiles, output, writeMode, opts)
+	}
+
+	return saveProfilesInteractive(profiles, output, opts)
 }
 
+func buildSyncResult(profiles []sso.ProfileTemplate, writeMode string) SyncResult {
+	items := make([]SyncProfileItem, len(profiles))
+	for i, p := range profiles {
+		items[i] = SyncProfileItem{
+			Name:      p.Name,
+			AccountID: p.AccountID,
+			RoleName:  p.RoleName,
+		}
+	}
+	return SyncResult{
+		ProfileCount: len(profiles),
+		Profiles:     items,
+		WriteMode:    writeMode,
+	}
+}
+
+// --- list ---
+
 func handleList(ctx context.Context, c *cli.Command) error {
+	opts := getGlobalOptions(c)
+
 	cfg, err := config.Load()
 	if err != nil {
 		return fmt.Errorf("failed to load AWS config: %w", err)
@@ -225,6 +298,19 @@ func handleList(ctx context.Context, c *cli.Command) error {
 		profiles = cfg.GetSSOProfiles()
 	} else {
 		profiles = cfg.Profiles
+	}
+
+	if opts.JSON {
+		entries := make([]ListResultEntry, len(profiles))
+		for i, p := range profiles {
+			entries[i] = ListResultEntry{
+				Name:      p.Name,
+				AccountID: p.SSOAccountID,
+				RoleName:  p.SSORoleName,
+				IsSSO:     p.IsSSO,
+			}
+		}
+		return emitJSON(entries)
 	}
 
 	if len(profiles) == 0 {
@@ -240,14 +326,17 @@ func handleList(ctx context.Context, c *cli.Command) error {
 			fmt.Printf("  %-30s  (access key)\n", p.Name)
 		}
 	}
-
 	return nil
 }
 
-func handleStatus(ctx context.Context, c *cli.Command) error {
-	profileName := c.String("profile")
+// --- status ---
 
-	// If profile not specified, use AWS_PROFILE env var
+const exitCodeInvalidSession = 3
+
+func handleStatus(ctx context.Context, c *cli.Command) error {
+	opts := getGlobalOptions(c)
+
+	profileName := c.String("profile")
 	if profileName == "" {
 		profileName = os.Getenv("AWS_PROFILE")
 		if profileName == "" {
@@ -255,7 +344,6 @@ func handleStatus(ctx context.Context, c *cli.Command) error {
 		}
 	}
 
-	// Load config to get profile details
 	cfg, err := config.Load()
 	if err != nil {
 		return fmt.Errorf("failed to load AWS config: %w", err)
@@ -267,16 +355,37 @@ func handleStatus(ctx context.Context, c *cli.Command) error {
 	}
 
 	if !profile.IsSSO {
+		result := StatusResult{Profile: profileName, Valid: false}
+		if opts.JSON {
+			return emitJSON(result)
+		}
 		fmt.Printf("Profile: %s\n", profileName)
 		fmt.Printf("Type: Access Key (not SSO)\n")
 		return nil
 	}
 
-	// Check session status
 	client := sso.NewClient()
 	status, err := client.GetSessionStatus(ctx, profile)
 	if err != nil {
+		// Operational error (network, config issue) — exit 1
 		return fmt.Errorf("failed to check session status: %w", err)
+	}
+
+	result := StatusResult{
+		Profile:   profileName,
+		AccountID: profile.SSOAccountID,
+		RoleName:  profile.SSORoleName,
+		Valid:     status.Valid,
+	}
+
+	if opts.JSON {
+		if err := emitJSON(result); err != nil {
+			return err
+		}
+		if !status.Valid {
+			return &ExitError{Code: exitCodeInvalidSession, Err: fmt.Errorf("session is invalid or expired"), Silent: true}
+		}
+		return nil
 	}
 
 	fmt.Printf("Profile: %s\n", profileName)
@@ -293,7 +402,7 @@ func handleStatus(ctx context.Context, c *cli.Command) error {
 		} else {
 			fmt.Printf("  aws sso login --profile %s\n", profileName)
 		}
+		return &ExitError{Code: exitCodeInvalidSession, Err: fmt.Errorf("session is invalid or expired")}
 	}
-
 	return nil
 }

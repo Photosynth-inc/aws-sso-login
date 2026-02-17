@@ -192,7 +192,7 @@ func (g *Generator) createProfile(account Account, role *Role, isReadOnly bool) 
 
 func extractSSOSession(ssoStartURL string) string {
 	// Extract domain name from URL as session name
-	// e.g., "https://ap-photosynth.awsapps.com/start/" -> "photosynth"
+	// e.g., "https://ap-mycompany.awsapps.com/start/" -> "mycompany"
 	parts := strings.Split(ssoStartURL, "//")
 	if len(parts) < 2 {
 		return "default"

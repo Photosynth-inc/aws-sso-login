@@ -2,6 +2,8 @@ package main
 
 import (
 	"context"
+	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 
@@ -10,6 +12,31 @@ import (
 
 var version = "dev"
 
+// GlobalOptions holds flags shared across all subcommands
+type GlobalOptions struct {
+	JSON bool
+	Yes  bool
+}
+
+func getGlobalOptions(c *cli.Command) GlobalOptions {
+	return GlobalOptions{
+		JSON: c.Bool("json"),
+		Yes:  c.Bool("yes"),
+	}
+}
+
+// logInfo prints a progress message to stderr (not captured by --json piping)
+func logInfo(format string, args ...any) {
+	fmt.Fprintf(os.Stderr, format+"\n", args...)
+}
+
+// emitJSON writes a structured result to stdout
+func emitJSON(v any) error {
+	enc := json.NewEncoder(os.Stdout)
+	enc.SetIndent("", "  ")
+	return enc.Encode(v)
+}
+
 func main() {
 	ctx := context.Background()
 
@@ -17,6 +44,17 @@ func main() {
 		Name:    "aws-sso-login",
 		Usage:   "Interactive AWS SSO (Identity Center) login CLI",
 		Version: version,
+		Flags: []cli.Flag{
+			&cli.BoolFlag{
+				Name:  "json",
+				Usage: "Output results as JSON (progress goes to stderr)",
+			},
+			&cli.BoolFlag{
+				Name:    "yes",
+				Aliases: []string{"y"},
+				Usage:   "Skip confirmation prompts",
+			},
+		},
 		Commands: []*cli.Command{
 			{
 				Name:   "login",
@@ -36,18 +74,23 @@ func main() {
 				},
 			},
 			{
-				Name:   "generate",
-				Usage:  "Generate AWS profiles from Identity Center",
-				Action: handleGenerate,
+				Name:    "sync",
+				Aliases: []string{"generate"},
+				Usage:   "Sync AWS profiles from Identity Center to ~/.aws/config",
+				Action:  handleSync,
 				Flags: []cli.Flag{
 					&cli.StringFlag{
 						Name:  "mode",
-						Usage: "Generation mode: admin, readonly, or dual",
+						Usage: "Sync mode: admin, readonly, or dual",
 						Value: "dual",
 					},
 					&cli.BoolFlag{
 						Name:  "dry-run",
-						Usage: "Preview generated profiles without writing",
+						Usage: "Preview synced profiles without writing",
+					},
+					&cli.StringFlag{
+						Name:  "write-mode",
+						Usage: "How to save: append, backup-replace, or stdout (required for non-interactive use)",
 					},
 					&cli.StringFlag{
 						Name:  "sso-start-url",
@@ -93,13 +136,29 @@ func main() {
 	}
 
 	if err := cmd.Run(ctx, os.Args); err != nil {
+		var exitErr *ExitError
+		if errors.As(err, &exitErr) {
+			if !exitErr.Silent {
+				fmt.Fprintf(os.Stderr, "Error: %v\n", exitErr.Err)
+			}
+			os.Exit(exitErr.Code)
+		}
 		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 		os.Exit(1)
 	}
 }
 
+// ExitError allows commands to return a specific exit code.
+// Set Silent=true to suppress stderr output (useful for --json where exit code alone is sufficient).
+type ExitError struct {
+	Code   int
+	Err    error
+	Silent bool
+}
+
+func (e *ExitError) Error() string { return e.Err.Error() }
+
 // handleDefault runs when no subcommand is specified
 func handleDefault(ctx context.Context, c *cli.Command) error {
-	// Default behavior: interactive login
 	return handleLogin(ctx, c)
 }

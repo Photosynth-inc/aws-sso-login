@@ -12,15 +12,52 @@ import (
 	"github.com/manifoldco/promptui"
 )
 
-func saveProfiles(profiles []sso.ProfileTemplate, output string) error {
+// saveProfilesNonInteractive saves profiles without interactive prompts.
+// writeMode must be one of: "append", "backup-replace", "stdout".
+func saveProfilesNonInteractive(profiles []sso.ProfileTemplate, output string, writeMode string, opts GlobalOptions) error {
+	configPath := filepath.Join(os.Getenv("HOME"), ".aws", "config")
+
+	switch writeMode {
+	case "stdout":
+		if opts.JSON {
+			return emitJSON(buildSyncResult(profiles, "stdout"))
+		}
+		fmt.Print(output)
+		return nil
+
+	case "append":
+		if err := appendToConfig(configPath, output); err != nil {
+			return err
+		}
+		if opts.JSON {
+			return emitJSON(buildSyncResult(profiles, "append"))
+		}
+		return nil
+
+	case "backup-replace":
+		if err := backupAndReplace(configPath, output); err != nil {
+			return err
+		}
+		if opts.JSON {
+			return emitJSON(buildSyncResult(profiles, "backup-replace"))
+		}
+		return nil
+
+	default:
+		return fmt.Errorf("invalid write-mode: %s (must be append, backup-replace, or stdout)", writeMode)
+	}
+}
+
+// saveProfilesInteractive shows generated profiles, warns about duplicates,
+// and prompts the user for how to save. Respects --yes to auto-select "append".
+func saveProfilesInteractive(profiles []sso.ProfileTemplate, output string, opts GlobalOptions) error {
 	configPath := filepath.Join(os.Getenv("HOME"), ".aws", "config")
 
 	fmt.Println(output)
 
-	// Check for existing config
 	existingConfig, _ := config.Load()
 
-	// Check for duplicate profile names
+	// Warn about duplicate profile names
 	if existingConfig != nil {
 		duplicates := findDuplicates(profiles, existingConfig)
 		if len(duplicates) > 0 {
@@ -32,7 +69,11 @@ func saveProfiles(profiles []sso.ProfileTemplate, output string) error {
 		}
 	}
 
-	// Ask how to save
+	// --yes skips the prompt and auto-selects "append"
+	if opts.Yes {
+		return appendToConfig(configPath, output)
+	}
+
 	action, err := selectSaveAction(configPath)
 	if err != nil {
 		return err
@@ -42,7 +83,7 @@ func saveProfiles(profiles []sso.ProfileTemplate, output string) error {
 	case "append":
 		return appendToConfig(configPath, output)
 	case "backup-replace":
-		return backupAndReplace(configPath, existingConfig, output)
+		return backupAndReplace(configPath, output)
 	case "cancel":
 		fmt.Println("Cancelled. No changes made.")
 		return nil
@@ -121,51 +162,43 @@ func appendToConfig(configPath, content string) error {
 	}
 	defer f.Close()
 
-	// Ensure newline separator
 	if _, err := f.WriteString("\n" + content); err != nil {
 		return fmt.Errorf("failed to write config: %w", err)
 	}
 
-	fmt.Printf("✓ Profiles appended to %s\n", configPath)
+	logInfo("✓ Profiles appended to %s", configPath)
 	return nil
 }
 
-func backupAndReplace(configPath string, existingConfig *config.Config, newContent string) error {
-	// Create backup
+func backupAndReplace(configPath string, newContent string) error {
 	backupPath := configPath + ".backup-" + time.Now().Format("20060102-150405")
 
-	if _, err := os.Stat(configPath); err == nil {
-		input, err := os.ReadFile(configPath)
-		if err != nil {
-			return fmt.Errorf("failed to read existing config: %w", err)
-		}
-		if err := os.WriteFile(backupPath, input, 0644); err != nil {
+	// Read raw file content (independent of config.Load parsing)
+	var original []byte
+	if b, err := os.ReadFile(configPath); err == nil {
+		original = b
+		if err := os.WriteFile(backupPath, b, 0644); err != nil {
 			return fmt.Errorf("failed to create backup: %w", err)
 		}
-		fmt.Printf("✓ Backup saved to %s\n", backupPath)
+		logInfo("✓ Backup saved to %s", backupPath)
 	}
 
-	// Preserve non-SSO profiles from existing config
+	// Preserve non-SSO profiles directly from raw text
 	var preserved strings.Builder
-	if existingConfig != nil {
-		originalContent, err := os.ReadFile(configPath)
-		if err == nil {
-			nonSSOSections := extractNonSSOSections(string(originalContent))
-			if nonSSOSections != "" {
-				preserved.WriteString("# Preserved non-SSO profiles\n")
-				preserved.WriteString(nonSSOSections)
-				preserved.WriteString("\n")
-			}
+	if len(original) > 0 {
+		if nonSSO := extractNonSSOSections(string(original)); nonSSO != "" {
+			preserved.WriteString("# Preserved non-SSO profiles\n")
+			preserved.WriteString(nonSSO)
+			preserved.WriteString("\n")
 		}
 	}
 
-	// Write new config: preserved sections + generated profiles
 	finalContent := preserved.String() + newContent
 	if err := os.WriteFile(configPath, []byte(finalContent), 0644); err != nil {
 		return fmt.Errorf("failed to write config: %w", err)
 	}
 
-	fmt.Printf("✓ Config written to %s\n", configPath)
+	logInfo("✓ Config written to %s", configPath)
 	return nil
 }
 
@@ -182,15 +215,12 @@ func extractNonSSOSections(content string) string {
 	for _, line := range lines {
 		trimmed := strings.TrimSpace(line)
 
-		// Detect section start
 		if strings.HasPrefix(trimmed, "[profile ") || strings.HasPrefix(trimmed, "[sso-session ") || strings.HasPrefix(trimmed, "[default]") {
-			// Flush previous section if non-SSO
 			if inSection && isNonSSO {
 				result.WriteString(sectionBuf.String())
 				result.WriteString("\n")
 			}
 
-			// Start new section
 			sectionBuf.Reset()
 			sectionBuf.WriteString(line + "\n")
 			inSection = true
@@ -203,7 +233,6 @@ func extractNonSSOSections(content string) string {
 		if inSection {
 			sectionBuf.WriteString(line + "\n")
 
-			// If this section has SSO keys, mark it as SSO
 			if strings.HasPrefix(trimmed, "sso_session") ||
 				strings.HasPrefix(trimmed, "sso_account_id") ||
 				strings.HasPrefix(trimmed, "sso_start_url") {
@@ -212,7 +241,6 @@ func extractNonSSOSections(content string) string {
 		}
 	}
 
-	// Flush last section
 	if inSection && isNonSSO {
 		result.WriteString(sectionBuf.String())
 	}
