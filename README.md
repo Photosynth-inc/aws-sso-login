@@ -29,25 +29,25 @@ aws-sso-login
 aws-sso-login login
 
 # Login with specific profile
-aws-sso-login --profile photosynth-dev-ro
+aws-sso-login --profile myapp-dev-ro
 
 # Filter to ReadOnly profiles only
 aws-sso-login --read-only
 ```
 
-### 2. Profile Generation
+### 2. Profile Sync
 
-Generate Admin and/or ReadOnly profiles from Identity Center:
+Sync Admin and/or ReadOnly profiles from Identity Center:
 
 ```bash
 # Preview generated profiles (dry-run)
-aws-sso-login generate --mode dual --dry-run
+aws-sso-login sync --mode dual --dry-run
 
-# Generate and save interactively (append or backup & replace)
-aws-sso-login generate --mode dual
+# Sync and save interactively (append or backup & replace)
+aws-sso-login sync --mode dual
 
 # First-time setup (SSO start URL required)
-aws-sso-login generate --sso-start-url https://your-domain.awsapps.com/start/
+aws-sso-login sync --sso-start-url https://your-domain.awsapps.com/start/
 ```
 
 If no valid SSO session exists, the tool will automatically start the login flow.
@@ -72,7 +72,7 @@ Duplicate profile names are detected and warned before saving.
 aws-sso-login status
 
 # Check specific profile
-aws-sso-login status --profile photosynth-dev-ro
+aws-sso-login status --profile myapp-dev-ro
 
 # List all profiles
 aws-sso-login list
@@ -86,22 +86,22 @@ aws-sso-login list --sso-only
 Profiles are stored in `~/.aws/config`:
 
 ```ini
-[profile photosynth-dev]
-sso_session = photosynth
+[profile myapp-dev]
+sso_session = mycompany
 sso_account_id = 123456789012
 sso_role_name = AdministratorAccess
 region = ap-northeast-1
 output = json
 
-[profile photosynth-dev-ro]
-sso_session = photosynth
+[profile myapp-dev-ro]
+sso_session = mycompany
 sso_account_id = 123456789012
 sso_role_name = ReadOnlyAccess
 region = ap-northeast-1
 output = json
 
-[sso-session photosynth]
-sso_start_url = https://ap-photosynth.awsapps.com/start/
+[sso-session mycompany]
+sso_start_url = https://your-domain.awsapps.com/start/
 sso_region = ap-northeast-1
 sso_registration_scopes = sso:account:access
 ```
