@@ -2,6 +2,7 @@ package sso
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -10,6 +11,7 @@ import (
 	"github.com/aws/aws-sdk-go-v2/aws"
 	awsconfig "github.com/aws/aws-sdk-go-v2/config"
 	"github.com/aws/aws-sdk-go-v2/service/ssooidc"
+	ssooidctypes "github.com/aws/aws-sdk-go-v2/service/ssooidc/types"
 )
 
 // RunSSOLogin performs SSO login using OIDC device authorization flow.
@@ -64,7 +66,11 @@ func RunSSOLogin(ctx context.Context, ssoStartURL, ssoRegion string) error {
 
 	deadline := time.Now().Add(time.Duration(auth.ExpiresIn) * time.Second)
 	for time.Now().Before(deadline) {
-		time.Sleep(time.Duration(interval) * time.Second)
+		select {
+		case <-ctx.Done():
+			return fmt.Errorf("authorization canceled: %w", ctx.Err())
+		case <-time.After(time.Duration(interval) * time.Second):
+		}
 
 		token, err := oidcClient.CreateToken(ctx, &ssooidc.CreateTokenInput{
 			ClientId:     reg.ClientId,
@@ -73,8 +79,19 @@ func RunSSOLogin(ctx context.Context, ssoStartURL, ssoRegion string) error {
 			DeviceCode:   auth.DeviceCode,
 		})
 		if err != nil {
-			// authorization_pending is expected, keep polling
-			continue
+			var pending *ssooidctypes.AuthorizationPendingException
+			var slow *ssooidctypes.SlowDownException
+			if errors.As(err, &pending) {
+				// authorization_pending is expected, keep polling
+				continue
+			}
+			if errors.As(err, &slow) {
+				// Server requested slower polling
+				interval += 5
+				continue
+			}
+			// Other errors (access_denied, expired_token, etc.) are fatal
+			return fmt.Errorf("create token failed: %w", err)
 		}
 
 		// Save token to SSO cache (compatible with AWS CLI)
