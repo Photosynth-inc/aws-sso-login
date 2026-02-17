@@ -21,10 +21,19 @@ type Profile struct {
 	IsSSO          bool
 }
 
+// SSOSession represents an SSO session configuration
+type SSOSession struct {
+	Name       string
+	StartURL   string
+	Region     string
+	Scopes     string
+}
+
 // Config represents AWS configuration
 type Config struct {
-	Profiles []*Profile
-	filePath string
+	Profiles    []*Profile
+	SSOSessions []*SSOSession
+	filePath    string
 }
 
 // Load reads AWS config from ~/.aws/config
@@ -45,8 +54,9 @@ func LoadFrom(path string) (*Config, error) {
 	}
 
 	config := &Config{
-		Profiles: make([]*Profile, 0),
-		filePath: path,
+		Profiles:    make([]*Profile, 0),
+		SSOSessions: make([]*SSOSession, 0),
+		filePath:    path,
 	}
 
 	for _, section := range cfg.Sections() {
@@ -73,6 +83,18 @@ func LoadFrom(path string) (*Config, error) {
 
 			config.Profiles = append(config.Profiles, profile)
 		}
+
+		// Parse sso-session sections
+		if len(section.Name()) > 12 && section.Name()[:12] == "sso-session " {
+			sessionName := section.Name()[12:]
+			ssoSession := &SSOSession{
+				Name:     sessionName,
+				StartURL: section.Key("sso_start_url").String(),
+				Region:   section.Key("sso_region").String(),
+				Scopes:   section.Key("sso_registration_scopes").String(),
+			}
+			config.SSOSessions = append(config.SSOSessions, ssoSession)
+		}
 	}
 
 	return config, nil
@@ -97,4 +119,21 @@ func (c *Config) GetProfile(name string) *Profile {
 		}
 	}
 	return nil
+}
+
+// GetSSOStartURL returns the first SSO start URL found
+func (c *Config) GetSSOStartURL() string {
+	// First try sso-session sections
+	if len(c.SSOSessions) > 0 {
+		return c.SSOSessions[0].StartURL
+	}
+
+	// Fallback to profiles with sso_start_url
+	for _, p := range c.Profiles {
+		if p.SSOStartURL != "" {
+			return p.SSOStartURL
+		}
+	}
+
+	return ""
 }

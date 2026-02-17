@@ -147,12 +147,9 @@ func handleGenerate(ctx context.Context, c *cli.Command) error {
 	if ssoStartURL == "" {
 		cfg, err := config.Load()
 		if err == nil {
-			for _, p := range cfg.Profiles {
-				if p.SSOStartURL != "" {
-					ssoStartURL = p.SSOStartURL
-					fmt.Printf("Using SSO start URL from existing config: %s\n", ssoStartURL)
-					break
-				}
+			ssoStartURL = cfg.GetSSOStartURL()
+			if ssoStartURL != "" {
+				fmt.Printf("Using SSO start URL from existing config: %s\n", ssoStartURL)
 			}
 		}
 	}
