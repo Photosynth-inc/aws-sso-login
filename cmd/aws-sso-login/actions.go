@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"fmt"
+	"os"
 	"strings"
 
 	"github.com/Photosynth-inc/aws-sso-login/internal/config"
@@ -236,5 +237,55 @@ func handleList(ctx context.Context, c *cli.Command) error {
 }
 
 func handleStatus(ctx context.Context, c *cli.Command) error {
-	return fmt.Errorf("not implemented yet")
+	profileName := c.String("profile")
+
+	// If profile not specified, use AWS_PROFILE env var
+	if profileName == "" {
+		profileName = os.Getenv("AWS_PROFILE")
+		if profileName == "" {
+			return fmt.Errorf("no profile specified. Use --profile or set AWS_PROFILE environment variable")
+		}
+	}
+
+	// Load config to get profile details
+	cfg, err := config.Load()
+	if err != nil {
+		return fmt.Errorf("failed to load AWS config: %w", err)
+	}
+
+	profile := cfg.GetProfile(profileName)
+	if profile == nil {
+		return fmt.Errorf("profile %q not found in ~/.aws/config", profileName)
+	}
+
+	if !profile.IsSSO {
+		fmt.Printf("Profile: %s\n", profileName)
+		fmt.Printf("Type: Access Key (not SSO)\n")
+		return nil
+	}
+
+	// Check session status
+	client := sso.NewClient()
+	status, err := client.GetSessionStatus(ctx, profile)
+	if err != nil {
+		return fmt.Errorf("failed to check session status: %w", err)
+	}
+
+	fmt.Printf("Profile: %s\n", profileName)
+	fmt.Printf("Account: %s\n", profile.SSOAccountID)
+	fmt.Printf("Role: %s\n", profile.SSORoleName)
+
+	if status.Valid {
+		fmt.Printf("Status: ✓ Valid\n")
+	} else {
+		fmt.Printf("Status: ✗ Invalid or expired\n")
+		fmt.Printf("\nTo login:\n")
+		if profile.SSOSession != "" {
+			fmt.Printf("  aws sso login --sso-session %s\n", profile.SSOSession)
+		} else {
+			fmt.Printf("  aws sso login --profile %s\n", profileName)
+		}
+	}
+
+	return nil
 }
