@@ -178,10 +178,7 @@ func selectProfileInteractive(profiles []*config.Profile) (*config.Profile, erro
 func handleSync(ctx context.Context, c *cli.Command) error {
 	opts := getGlobalOptions(c)
 
-	mode := c.String("mode")
-	if mode != "admin" && mode != "readonly" && mode != "dual" {
-		return fmt.Errorf("invalid mode: %s (must be admin, readonly, or dual)", mode)
-	}
+	includeRoles := c.StringSlice("include-roles")
 
 	ssoStartURL := c.String("sso-start-url")
 	ssoRegion := c.String("sso-region")
@@ -235,7 +232,7 @@ func handleSync(ctx context.Context, c *cli.Command) error {
 	generator.SetAccessToken(token.AccessToken)
 
 	logInfo("Fetching accounts from Identity Center...")
-	profiles, err := generator.GenerateProfiles(ctx, mode)
+	profiles, err := generator.GenerateProfiles(ctx, includeRoles)
 	if err != nil {
 		return fmt.Errorf("failed to sync profiles: %w", err)
 	}

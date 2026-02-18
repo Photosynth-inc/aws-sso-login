@@ -5,11 +5,19 @@ import (
 	"fmt"
 	"sort"
 	"strings"
+	"unicode"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	awsconfig "github.com/aws/aws-sdk-go-v2/config"
 	awssso "github.com/aws/aws-sdk-go-v2/service/sso"
 )
+
+// knownRoleSuffixes maps well-known role names to their profile name suffix.
+var knownRoleSuffixes = map[string]string{
+	"AdministratorAccess": "",
+	"ReadOnlyAccess":      "-ro",
+	"ps-BedrockAccess":    "-bedrock",
+}
 
 // Account represents an AWS account from Identity Center
 type Account struct {
@@ -134,11 +142,23 @@ func (g *Generator) ListAccountRoles(ctx context.Context, accountID string) ([]R
 	return roles, nil
 }
 
-// GenerateProfiles generates profile templates based on mode
-func (g *Generator) GenerateProfiles(ctx context.Context, mode string) ([]ProfileTemplate, error) {
+// GenerateProfiles generates profile templates for all accounts.
+// Known roles (in knownRoleSuffixes) are always included.
+// includeRoles can contain "all" to include every role, or specific role names to opt-in.
+func (g *Generator) GenerateProfiles(ctx context.Context, includeRoles []string) ([]ProfileTemplate, error) {
 	accounts, err := g.ListAccounts(ctx)
 	if err != nil {
 		return nil, err
+	}
+
+	includeAll := false
+	extraRoles := make(map[string]bool)
+	for _, r := range includeRoles {
+		if r == "all" {
+			includeAll = true
+		} else {
+			extraRoles[r] = true
+		}
 	}
 
 	var profiles []ProfileTemplate
@@ -150,37 +170,16 @@ func (g *Generator) GenerateProfiles(ctx context.Context, mode string) ([]Profil
 			continue
 		}
 
-		// Find AdministratorAccess and ReadOnlyAccess
-		var adminRole, readOnlyRole *Role
-		for i := range roles {
-			if roles[i].RoleName == "AdministratorAccess" {
-				adminRole = &roles[i]
-			}
-			if roles[i].RoleName == "ReadOnlyAccess" {
-				readOnlyRole = &roles[i]
-			}
-		}
-
-		switch mode {
-		case "admin":
-			if adminRole != nil {
-				profiles = append(profiles, g.createProfile(account, adminRole, false))
-			}
-		case "readonly":
-			if readOnlyRole != nil {
-				profiles = append(profiles, g.createProfile(account, readOnlyRole, true))
-			}
-		case "dual":
-			if adminRole != nil {
-				profiles = append(profiles, g.createProfile(account, adminRole, false))
-			}
-			if readOnlyRole != nil {
-				profiles = append(profiles, g.createProfile(account, readOnlyRole, true))
+		for _, role := range roles {
+			if suffix, known := knownRoleSuffixes[role.RoleName]; known {
+				profiles = append(profiles, g.createProfile(account, &role, suffix))
+			} else if includeAll || extraRoles[role.RoleName] {
+				suffix := roleSuffix(role.RoleName)
+				profiles = append(profiles, g.createProfile(account, &role, suffix))
 			}
 		}
 	}
 
-	// Sort profiles by name
 	sort.Slice(profiles, func(i, j int) bool {
 		return profiles[i].Name < profiles[j].Name
 	})
@@ -188,13 +187,9 @@ func (g *Generator) GenerateProfiles(ctx context.Context, mode string) ([]Profil
 	return profiles, nil
 }
 
-func (g *Generator) createProfile(account Account, role *Role, isReadOnly bool) ProfileTemplate {
-	name := account.AccountName
-	if isReadOnly {
-		name = fmt.Sprintf("%s-ro", name)
-	}
+func (g *Generator) createProfile(account Account, role *Role, suffix string) ProfileTemplate {
+	name := account.AccountName + suffix
 
-	// Extract SSO session name from SSO start URL
 	ssoSession := extractSSOSession(g.ssoStartURL)
 
 	return ProfileTemplate{
@@ -208,6 +203,33 @@ func (g *Generator) createProfile(account Account, role *Role, isReadOnly bool) 
 		Region:      g.defaultRegion,
 		Output:      "json",
 	}
+}
+
+// roleSuffix converts an unknown role name to a kebab-case suffix.
+// It strips trailing "Access"/"Permission", converts CamelCase to lower-kebab-case,
+// and prefixes with "-".
+func roleSuffix(roleName string) string {
+	s := roleName
+	s = strings.TrimSuffix(s, "Access")
+	s = strings.TrimSuffix(s, "Permission")
+	if s == "" {
+		s = roleName
+	}
+	return "-" + camelToKebab(s)
+}
+
+func camelToKebab(s string) string {
+	var buf strings.Builder
+	for i, r := range s {
+		if unicode.IsUpper(r) && i > 0 {
+			prev := rune(s[i-1])
+			if unicode.IsLower(prev) || unicode.IsDigit(prev) {
+				buf.WriteByte('-')
+			}
+		}
+		buf.WriteRune(unicode.ToLower(r))
+	}
+	return buf.String()
 }
 
 func extractSSOSession(ssoStartURL string) string {

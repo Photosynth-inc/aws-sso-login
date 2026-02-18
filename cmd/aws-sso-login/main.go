@@ -77,10 +77,9 @@ func main() {
 				Usage:   "Sync AWS profiles from Identity Center to ~/.aws/config",
 				Action:  handleSync,
 				Flags: []cli.Flag{
-					&cli.StringFlag{
-						Name:  "mode",
-						Usage: "Sync mode: admin, readonly, or dual",
-						Value: "dual",
+					&cli.StringSliceFlag{
+						Name:  "include-roles",
+						Usage: `Additional roles to include (e.g. "ps-BedrockAccess") or "all" for all roles`,
 					},
 					&cli.BoolFlag{
 						Name:  "dry-run",
