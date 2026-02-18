@@ -178,10 +178,6 @@ func selectProfileInteractive(profiles []*config.Profile) (*config.Profile, erro
 func handleSync(ctx context.Context, c *cli.Command) error {
 	opts := getGlobalOptions(c)
 
-	if mode := c.String("mode"); mode != "" {
-		logInfo("Warning: --mode is deprecated and will be removed in a future version. All known roles are now always included. Use --include-roles for additional roles.")
-	}
-
 	includeRoles := c.StringSlice("include-roles")
 
 	ssoStartURL := c.String("sso-start-url")

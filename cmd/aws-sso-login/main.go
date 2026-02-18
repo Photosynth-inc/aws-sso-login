@@ -81,10 +81,6 @@ func main() {
 						Name:  "include-roles",
 						Usage: `Additional roles to include (e.g. "ps-BedrockAccess") or "all" for all roles`,
 					},
-					&cli.StringFlag{
-						Name:   "mode",
-						Hidden: true,
-					},
 					&cli.BoolFlag{
 						Name:  "dry-run",
 						Usage: "Preview synced profiles without writing",
