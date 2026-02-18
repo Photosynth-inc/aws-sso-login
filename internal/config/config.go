@@ -121,6 +121,44 @@ func (c *Config) GetProfile(name string) *Profile {
 	return nil
 }
 
+// GetSSOSession returns an SSO session by name
+func (c *Config) GetSSOSession(name string) *SSOSession {
+	for _, s := range c.SSOSessions {
+		if s.Name == name {
+			return s
+		}
+	}
+	return nil
+}
+
+// ResolveStartURL returns the SSO start URL for a profile,
+// looking up the sso_session if needed.
+func (c *Config) ResolveStartURL(p *Profile) string {
+	if p.SSOStartURL != "" {
+		return p.SSOStartURL
+	}
+	if p.SSOSession != "" {
+		if s := c.GetSSOSession(p.SSOSession); s != nil {
+			return s.StartURL
+		}
+	}
+	return ""
+}
+
+// ResolveRegion returns the SSO region for a profile,
+// looking up the sso_session if needed.
+func (c *Config) ResolveRegion(p *Profile) string {
+	if p.SSORegion != "" {
+		return p.SSORegion
+	}
+	if p.SSOSession != "" {
+		if s := c.GetSSOSession(p.SSOSession); s != nil {
+			return s.Region
+		}
+	}
+	return ""
+}
+
 // GetSSOStartURL returns the first SSO start URL found
 func (c *Config) GetSSOStartURL() string {
 	// First try sso-session sections

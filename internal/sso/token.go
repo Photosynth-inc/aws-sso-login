@@ -80,6 +80,9 @@ func GetTokenForStartURL(startURL string) (*CachedToken, error) {
 		return nil, fmt.Errorf("failed to read SSO cache directory: %w", err)
 	}
 
+	var best *CachedToken
+	foundExpired := false
+
 	for _, entry := range entries {
 		if entry.IsDir() || filepath.Ext(entry.Name()) != ".json" {
 			continue
@@ -96,17 +99,27 @@ func GetTokenForStartURL(startURL string) (*CachedToken, error) {
 			continue
 		}
 
-		// Check if this token matches the start URL
-		if token.StartURL == startURL {
-			// Skip expired tokens
-			if time.Now().After(token.ExpiresAt) {
-				return nil, fmt.Errorf("SSO token for %s is expired. Please run 'aws sso login' first", startURL)
-			}
+		if token.StartURL != startURL || token.AccessToken == "" {
+			continue
+		}
+		if time.Now().After(token.ExpiresAt) {
+			foundExpired = true
+			continue
+		}
 
-			token.FilePath = tokenPath
-			return &token, nil
+		t := token
+		t.FilePath = tokenPath
+		if best == nil || t.ExpiresAt.After(best.ExpiresAt) {
+			best = &t
 		}
 	}
 
+	if best != nil {
+		return best, nil
+	}
+
+	if foundExpired {
+		return nil, fmt.Errorf("SSO token for %s is expired. Please run 'aws sso login' first", startURL)
+	}
 	return nil, fmt.Errorf("no SSO token found for %s. Please run 'aws sso login' first", startURL)
 }

@@ -96,8 +96,9 @@ func handleLogin(ctx context.Context, c *cli.Command) error {
 		}
 	}
 
+	startURL := cfg.ResolveStartURL(selectedProfile)
 	client := sso.NewClient()
-	if err := client.Login(ctx, selectedProfile); err != nil {
+	if err := client.Login(ctx, selectedProfile, startURL); err != nil {
 		return fmt.Errorf("SSO login failed: %w", err)
 	}
 
@@ -297,6 +298,17 @@ func handleList(ctx context.Context, c *cli.Command) error {
 		profiles = cfg.Profiles
 	}
 
+	readOnly := c.Bool("read-only")
+	if readOnly {
+		var filtered []*config.Profile
+		for _, p := range profiles {
+			if strings.HasSuffix(p.Name, "-ro") {
+				filtered = append(filtered, p)
+			}
+		}
+		profiles = filtered
+	}
+
 	if opts.JSON {
 		entries := make([]ListResultEntry, len(profiles))
 		for i, p := range profiles {
@@ -311,7 +323,11 @@ func handleList(ctx context.Context, c *cli.Command) error {
 	}
 
 	if len(profiles) == 0 {
-		fmt.Println("No profiles found")
+		if readOnly {
+			fmt.Println("No read-only profiles found (profiles ending with -ro)")
+		} else {
+			fmt.Println("No profiles found")
+		}
 		return nil
 	}
 
