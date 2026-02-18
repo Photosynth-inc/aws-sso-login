@@ -31,6 +31,11 @@ func TestCamelToKebab(t *testing.T) {
 		{"ViewOnly", "view-only"},
 		{"PowerUser", "power-user"},
 		{"ABC", "abc"},
+		{"ABCDef", "abc-def"},
+		{"APIGateway", "api-gateway"},
+		{"MyAWSRole", "my-aws-role"},
+		{"S3Access", "s3-access"},
+		{"EC2ReadOnly", "ec2-read-only"},
 		{"camelCase", "camel-case"},
 		{"already-kebab", "already-kebab"},
 	}

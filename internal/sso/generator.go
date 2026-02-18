@@ -220,10 +220,14 @@ func roleSuffix(roleName string) string {
 
 func camelToKebab(s string) string {
 	var buf strings.Builder
-	for i, r := range s {
+	runes := []rune(s)
+	for i, r := range runes {
 		if unicode.IsUpper(r) && i > 0 {
-			prev := rune(s[i-1])
+			prev := runes[i-1]
 			if unicode.IsLower(prev) || unicode.IsDigit(prev) {
+				buf.WriteByte('-')
+			} else if unicode.IsUpper(prev) && i+1 < len(runes) && unicode.IsLower(runes[i+1]) {
+				// End of consecutive uppercase run: "APIGateway" → "api-gateway"
 				buf.WriteByte('-')
 			}
 		}
