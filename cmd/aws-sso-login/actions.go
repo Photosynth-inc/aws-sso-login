@@ -297,6 +297,16 @@ func handleList(ctx context.Context, c *cli.Command) error {
 		profiles = cfg.Profiles
 	}
 
+	if c.Bool("read-only") {
+		filtered := make([]*config.Profile, 0)
+		for _, p := range profiles {
+			if strings.HasSuffix(p.Name, "-ro") {
+				filtered = append(filtered, p)
+			}
+		}
+		profiles = filtered
+	}
+
 	if opts.JSON {
 		entries := make([]ListResultEntry, len(profiles))
 		for i, p := range profiles {
