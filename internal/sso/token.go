@@ -81,6 +81,7 @@ func GetTokenForStartURL(startURL string) (*CachedToken, error) {
 	}
 
 	var best *CachedToken
+	foundExpired := false
 
 	for _, entry := range entries {
 		if entry.IsDir() || filepath.Ext(entry.Name()) != ".json" {
@@ -102,12 +103,14 @@ func GetTokenForStartURL(startURL string) (*CachedToken, error) {
 			continue
 		}
 		if time.Now().After(token.ExpiresAt) {
+			foundExpired = true
 			continue
 		}
 
-		token.FilePath = tokenPath
-		if best == nil || token.ExpiresAt.After(best.ExpiresAt) {
-			best = &token
+		t := token
+		t.FilePath = tokenPath
+		if best == nil || t.ExpiresAt.After(best.ExpiresAt) {
+			best = &t
 		}
 	}
 
@@ -115,5 +118,8 @@ func GetTokenForStartURL(startURL string) (*CachedToken, error) {
 		return best, nil
 	}
 
-	return nil, fmt.Errorf("no valid SSO token found for %s. Please run 'aws sso login' first", startURL)
+	if foundExpired {
+		return nil, fmt.Errorf("SSO token for %s is expired. Please run 'aws sso login' first", startURL)
+	}
+	return nil, fmt.Errorf("no SSO token found for %s. Please run 'aws sso login' first", startURL)
 }
