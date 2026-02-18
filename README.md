@@ -5,7 +5,7 @@ Interactive AWS SSO (Identity Center) login CLI with automatic profile generatio
 ## Features
 
 - 🔐 **Interactive profile selection** - Choose AWS profiles with fuzzy search
-- 📋 **Auto-generate profiles** - Create Admin + ReadOnly profiles from Identity Center
+- 📋 **Auto-generate profiles** - Create profiles from Identity Center (known roles auto-detected, custom roles via `--include-roles`)
 - 🔄 **Session management** - Check login status and expiration
 - 🛡️ **ReadOnly mode** - Safe account investigation with read-only access
 
@@ -41,14 +41,17 @@ aws-sso-login --read-only
 
 ### 2. Profile Sync
 
-Sync Admin and/or ReadOnly profiles from Identity Center:
+Sync profiles from Identity Center. Known roles (`AdministratorAccess`, `ReadOnlyAccess`, `ps-BedrockAccess`) are always included when present. Unknown roles are skipped unless opted in via `--include-roles`.
 
 ```bash
 # Preview generated profiles (dry-run)
-aws-sso-login sync --mode dual --dry-run
+aws-sso-login sync --dry-run
 
-# Sync and save interactively (append or backup & replace)
-aws-sso-login sync --mode dual
+# Include all roles (including unknown ones)
+aws-sso-login sync --dry-run --include-roles all
+
+# Include specific additional roles
+aws-sso-login sync --dry-run --include-roles ViewOnlyAccess --include-roles PowerUserAccess
 
 # First-time setup (SSO start URL required)
 aws-sso-login sync --sso-start-url https://your-domain.awsapps.com/start/
@@ -63,7 +66,7 @@ When saving without `--dry-run`, you'll be prompted to choose:
 Duplicate profile names are detected and warned before saving.
 
 **Options:**
-- `--mode`: `admin`, `readonly`, or `dual` (default: `dual`)
+- `--include-roles`: Additional role names to include, or `"all"` for all roles
 - `--dry-run`: Preview without saving
 - `--sso-start-url`: SSO start URL (auto-detected from existing config)
 - `--sso-region`: SSO region (default: `ap-northeast-1`)
