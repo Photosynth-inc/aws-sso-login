@@ -96,8 +96,9 @@ func handleLogin(ctx context.Context, c *cli.Command) error {
 		}
 	}
 
+	startURL := cfg.ResolveStartURL(selectedProfile)
 	client := sso.NewClient()
-	if err := client.Login(ctx, selectedProfile); err != nil {
+	if err := client.Login(ctx, selectedProfile, startURL); err != nil {
 		return fmt.Errorf("SSO login failed: %w", err)
 	}
 

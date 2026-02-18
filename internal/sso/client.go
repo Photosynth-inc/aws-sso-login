@@ -18,21 +18,16 @@ func NewClient() *Client {
 }
 
 // Login performs SSO login for the specified profile.
-// It skips the browser flow if a valid cached token already exists.
-func (c *Client) Login(ctx context.Context, profile *config.Profile) error {
+// It skips the browser flow if a valid cached token already exists for startURL.
+func (c *Client) Login(ctx context.Context, profile *config.Profile, startURL string) error {
 	if !profile.IsSSO {
 		return fmt.Errorf("profile %q is not an SSO profile", profile.Name)
 	}
 
-	// Resolve the SSO start URL for this profile
-	cfg, err := config.Load()
-	if err == nil {
-		startURL := cfg.ResolveStartURL(profile)
-		if startURL != "" {
-			if token, err := GetTokenForStartURL(startURL); err == nil {
-				fmt.Fprintf(os.Stderr, "Using existing SSO session (expires: %s)\n", token.ExpiresAt.Format("2006-01-02 15:04:05"))
-				return nil
-			}
+	if startURL != "" {
+		if token, err := GetTokenForStartURL(startURL); err == nil {
+			fmt.Fprintf(os.Stderr, "Using existing SSO session (expires: %s)\n", token.ExpiresAt.Format("2006-01-02 15:04:05"))
+			return nil
 		}
 	}
 
@@ -61,7 +56,6 @@ func (c *Client) GetSessionStatus(ctx context.Context, profile *config.Profile) 
 		return nil, fmt.Errorf("profile %q is not an SSO profile", profile.Name)
 	}
 
-	// Try to get caller identity to check if session is valid
 	cmd := exec.CommandContext(ctx, "aws", "sts", "get-caller-identity", "--profile", profile.Name)
 	output, err := cmd.CombinedOutput()
 	if err != nil {
