@@ -40,7 +40,7 @@ func GetRoleCredentials(ctx context.Context, accessToken, accountID, roleName, s
 
 	return &RoleCredentials{
 		AccessKeyID:     aws.ToString(out.RoleCredentials.AccessKeyId),
-		SecretAccessKey:  aws.ToString(out.RoleCredentials.SecretAccessKey),
+		SecretAccessKey: aws.ToString(out.RoleCredentials.SecretAccessKey),
 		SessionToken:    aws.ToString(out.RoleCredentials.SessionToken),
 		Expiration:      time.UnixMilli(out.RoleCredentials.Expiration),
 	}, nil
