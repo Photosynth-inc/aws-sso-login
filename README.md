@@ -4,10 +4,11 @@ Interactive AWS SSO (Identity Center) login CLI with automatic profile generatio
 
 ## Features
 
-- 🔐 **Interactive profile selection** - Choose AWS profiles with fuzzy search
-- 📋 **Auto-generate profiles** - Create profiles from Identity Center (known roles auto-detected, custom roles via `--include-roles`)
-- 🔄 **Session management** - Check login status and expiration
-- 🛡️ **ReadOnly mode** - Safe account investigation with read-only access
+- **Interactive profile selection** - Choose AWS profiles with fuzzy search
+- **Auto-generate profiles** - Create profiles from Identity Center (known roles auto-detected, custom roles via `--include-roles`)
+- **Session management** - Check login status and expiration
+- **ReadOnly mode** - Safe account investigation with read-only access
+- **Scoped credentials** - Export temporary credentials for a specific role via `creds`
 
 ## Installation
 
@@ -19,51 +20,98 @@ brew install Photosynth-inc/tap/aws-sso-login
 go install github.com/Photosynth-inc/aws-sso-login/cmd/aws-sso-login@latest
 ```
 
+## Subcommands
+
+| Command | Purpose |
+|---------|---------|
+| `login` (default) | Authenticate to AWS SSO (browser flow only) |
+| `use` | Select a profile and export `AWS_PROFILE` |
+| `creds` | Get scoped temporary credentials via `GetRoleCredentials` API |
+| `sync` | Generate profiles from Identity Center |
+| `list` | List available AWS profiles |
+| `status` | Check session validity |
+
 ## Usage
 
-### 1. Interactive Login (Default)
+### login (default)
 
-Choose AWS profile interactively with fuzzy search:
+Authenticate to AWS SSO. No profile selection — just establishes the SSO session.
 
 ```bash
-# Interactive selection from all SSO profiles
+# Auto-detect start URL from existing config
 aws-sso-login
-
-# Or explicitly
 aws-sso-login login
 
-# Login with specific profile
-aws-sso-login --profile myapp-dev-ro
-
-# Filter to ReadOnly profiles only
-aws-sso-login --read-only
+# Explicit start URL
+aws-sso-login login --sso-start-url https://your-domain.awsapps.com/start/
 ```
 
-### 2. Profile Sync
+### use
 
-Sync profiles from Identity Center. Known roles (`AdministratorAccess`, `ReadOnlyAccess`, `ps-BedrockAccess`) are always included when present. Unknown roles are skipped unless opted in via `--include-roles`.
+Select a profile and set `AWS_PROFILE`. Auto-triggers login if no valid session exists.
+
+```bash
+# Interactive selection
+aws-sso-login use
+
+# Specific profile
+aws-sso-login use myapp-dev
+
+# ReadOnly profiles only
+aws-sso-login use --read-only
+
+# Shell eval (recommended wrapper)
+eval $(aws-sso-login use --export)
+eval $(aws-sso-login use myapp-dev --export)
+
+# JSON output
+aws-sso-login use myapp-dev --json
+```
+
+Shell function for convenience:
+
+```bash
+awsl() { eval $(aws-sso-login use "$@" --export); }
+```
+
+### creds
+
+Get scoped temporary credentials via the `GetRoleCredentials` API. Unlike `use`, this does not rely on `AWS_PROFILE` or cached SSO tokens in the environment — it exports actual `AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY` / `AWS_SESSION_TOKEN`.
+
+```bash
+# Export credentials for shell eval
+eval $(aws-sso-login creds myapp-dev-ro)
+
+# credential_process compatible JSON
+aws-sso-login creds myapp-dev-ro --format json
+```
+
+Use with `credential_process` in `~/.aws/config`:
+
+```ini
+[profile myapp-dev-ro-scoped]
+credential_process = aws-sso-login creds myapp-dev-ro --format json
+```
+
+> **Security note**: `creds` is a best-effort guardrail. It reduces the attack surface by not exposing SSO tokens, but is not a security boundary. See [docs/security-model.md](docs/security-model.md) for details.
+
+### sync
+
+Sync profiles from Identity Center. Known roles (`AdministratorAccess`, `ReadOnlyAccess`, `ps-BedrockAccess`) are always included when present.
 
 ```bash
 # Preview generated profiles (dry-run)
 aws-sso-login sync --dry-run
 
-# Include all roles (including unknown ones)
+# Include all roles
 aws-sso-login sync --dry-run --include-roles all
 
 # Include specific additional roles
 aws-sso-login sync --dry-run --include-roles ViewOnlyAccess --include-roles PowerUserAccess
 
-# First-time setup (SSO start URL required)
+# First-time setup
 aws-sso-login sync --sso-start-url https://your-domain.awsapps.com/start/
 ```
-
-If no valid SSO session exists, the tool will automatically start the login flow.
-
-When saving without `--dry-run`, you'll be prompted to choose:
-- **Append** - Add profiles to the end of `~/.aws/config`
-- **Backup & Replace** - Back up the current config and write a fresh file
-
-Duplicate profile names are detected and warned before saving.
 
 **Options:**
 - `--include-roles`: Additional role names to include, or `"all"` for all roles
@@ -72,21 +120,32 @@ Duplicate profile names are detected and warned before saving.
 - `--sso-region`: SSO region (default: `ap-northeast-1`)
 - `--default-region`: Default AWS region (default: `ap-northeast-1`)
 
-### 3. Session Management
+### Session Management
 
 ```bash
-# Check session status for current profile (AWS_PROFILE)
-aws-sso-login status
-
-# Check specific profile
+# Check session status
 aws-sso-login status --profile myapp-dev-ro
 
 # List all profiles
 aws-sso-login list
-
-# List SSO profiles only
 aws-sso-login list --sso-only
 ```
+
+## AI Agent Usage
+
+For AI agents (Claude Code, etc.), use `creds` to limit credential scope:
+
+```bash
+# Give agent only ReadOnly credentials
+eval $(aws-sso-login creds myapp-dev-ro)
+```
+
+For stronger isolation, combine with:
+1. Claude Code hooks to block `~/.aws/sso/cache/` reads
+2. Container / separate OS user
+3. AWS Permission Boundaries (server-side, authoritative)
+
+See [docs/security-model.md](docs/security-model.md) for the full threat model.
 
 ## Configuration
 

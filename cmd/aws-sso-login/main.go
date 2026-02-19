@@ -68,8 +68,47 @@ func main() {
 		Commands: []*cli.Command{
 			{
 				Name:   "login",
-				Usage:  "Login to AWS SSO interactively",
+				Usage:  "Authenticate to AWS SSO (browser flow only, no profile selection)",
 				Action: handleLogin,
+				Flags: []cli.Flag{
+					&cli.StringFlag{
+						Name:  "sso-start-url",
+						Usage: "SSO start URL (auto-detected from existing config)",
+					},
+					&cli.StringFlag{
+						Name:  "sso-region",
+						Usage: "SSO region",
+						Value: "ap-northeast-1",
+					},
+				},
+			},
+			{
+				Name:   "use",
+				Usage:  "Select a profile and export AWS_PROFILE",
+				Action: handleUse,
+				Flags: []cli.Flag{
+					&cli.BoolFlag{
+						Name:  "export",
+						Usage: "Print 'export AWS_PROFILE=...' for shell eval",
+					},
+				},
+			},
+			{
+				Name:    "creds",
+				Aliases: []string{"get-role-credentials"},
+				Usage:   "Get scoped temporary credentials via GetRoleCredentials API",
+				Action:  handleCreds,
+				Flags: []cli.Flag{
+					&cli.BoolFlag{
+						Name:  "export",
+						Usage: "Print 'export AWS_ACCESS_KEY_ID=...' lines for shell eval",
+					},
+					&cli.StringFlag{
+						Name:  "format",
+						Usage: "Output format: export or json (credential_process compatible)",
+						Value: "export",
+					},
+				},
 			},
 			{
 				Name:    "sync",
