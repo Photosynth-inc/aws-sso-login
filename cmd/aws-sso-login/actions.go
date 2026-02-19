@@ -75,11 +75,16 @@ func handleLogin(ctx context.Context, c *cli.Command) error {
 		cfg, err := config.Load()
 		if err == nil {
 			if profileName := c.String("profile"); profileName != "" {
-				if p := cfg.GetProfile(profileName); p != nil {
-					ssoStartURL = cfg.ResolveStartURL(p)
-					if r := cfg.ResolveRegion(p); r != "" {
-						ssoRegion = r
-					}
+				p := cfg.GetProfile(profileName)
+				if p == nil {
+					return fmt.Errorf("profile %q not found", profileName)
+				}
+				if !p.IsSSO {
+					return fmt.Errorf("profile %q is not an SSO profile", profileName)
+				}
+				ssoStartURL = cfg.ResolveStartURL(p)
+				if r := cfg.ResolveRegion(p); r != "" {
+					ssoRegion = r
 				}
 			}
 			if ssoStartURL == "" {
@@ -149,10 +154,17 @@ func handleUse(ctx context.Context, c *cli.Command) error {
 		if selectedProfile == nil {
 			return fmt.Errorf("profile %q not found", profileName)
 		}
+		if !selectedProfile.IsSSO {
+			return fmt.Errorf("profile %q is not an SSO profile", profileName)
+		}
 	} else if c.Args().Len() > 0 {
-		selectedProfile = cfg.GetProfile(c.Args().First())
+		name := c.Args().First()
+		selectedProfile = cfg.GetProfile(name)
 		if selectedProfile == nil {
-			return fmt.Errorf("profile %q not found", c.Args().First())
+			return fmt.Errorf("profile %q not found", name)
+		}
+		if !selectedProfile.IsSSO {
+			return fmt.Errorf("profile %q is not an SSO profile", name)
 		}
 	} else if opts.JSON {
 		return fmt.Errorf("--profile or positional argument is required when using --json")
@@ -182,7 +194,7 @@ func handleUse(ctx context.Context, c *cli.Command) error {
 	ssoRegion := cfg.ResolveRegion(selectedProfile)
 	if startURL != "" {
 		if _, tokenErr := sso.GetTokenForStartURL(startURL); tokenErr != nil {
-			if _, fallbackErr := sso.GetLatestToken(); fallbackErr != nil {
+			if fallbackToken, fallbackErr := sso.GetLatestToken(); fallbackErr != nil {
 				if opts.JSON {
 					return fmt.Errorf("no valid SSO session. Run 'aws-sso-login login' first")
 				}
@@ -190,6 +202,8 @@ func handleUse(ctx context.Context, c *cli.Command) error {
 				if loginErr := sso.RunSSOLogin(ctx, startURL, ssoRegion); loginErr != nil {
 					return fmt.Errorf("SSO login failed: %w", loginErr)
 				}
+			} else if fallbackToken.StartURL != startURL {
+				logInfo("Warning: Using token for %s instead of %s", fallbackToken.StartURL, startURL)
 			}
 		}
 	}
@@ -269,6 +283,8 @@ func handleCreds(ctx context.Context, c *cli.Command) error {
 					return fmt.Errorf("failed to get SSO token after login: %w", err)
 				}
 			}
+		} else if token.StartURL != startURL {
+			logInfo("Warning: Using token for %s instead of %s", token.StartURL, startURL)
 		}
 	}
 
@@ -291,11 +307,13 @@ func handleCreds(ctx context.Context, c *cli.Command) error {
 			SessionToken:    creds.SessionToken,
 			Expiration:      creds.Expiration.Format("2006-01-02T15:04:05Z"),
 		})
-	default: // "export"
+	case "export":
 		fmt.Printf("export AWS_ACCESS_KEY_ID=%s\n", creds.AccessKeyID)
 		fmt.Printf("export AWS_SECRET_ACCESS_KEY=%s\n", creds.SecretAccessKey)
 		fmt.Printf("export AWS_SESSION_TOKEN=%s\n", creds.SessionToken)
 		return nil
+	default:
+		return fmt.Errorf("invalid --format %q (allowed: export, json)", format)
 	}
 }
 

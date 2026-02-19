@@ -38,6 +38,10 @@ func GetRoleCredentials(ctx context.Context, accessToken, accountID, roleName, s
 		return nil, fmt.Errorf("GetRoleCredentials failed: %w", err)
 	}
 
+	if out.RoleCredentials == nil {
+		return nil, fmt.Errorf("GetRoleCredentials returned empty credentials")
+	}
+
 	return &RoleCredentials{
 		AccessKeyID:     aws.ToString(out.RoleCredentials.AccessKeyId),
 		SecretAccessKey: aws.ToString(out.RoleCredentials.SecretAccessKey),
