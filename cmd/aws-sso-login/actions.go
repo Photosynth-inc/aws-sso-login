@@ -15,9 +15,22 @@ import (
 // --- JSON result types ---
 
 type LoginResult struct {
+	StartURL  string `json:"startUrl"`
+	ExpiresAt string `json:"expiresAt"`
+}
+
+type UseResult struct {
 	Profile   string `json:"profile"`
 	AccountID string `json:"accountId"`
 	RoleName  string `json:"roleName"`
+}
+
+type CredentialProcessOutput struct {
+	Version         int    `json:"Version"`
+	AccessKeyID     string `json:"AccessKeyId"`
+	SecretAccessKey string `json:"SecretAccessKey"`
+	SessionToken    string `json:"SessionToken"`
+	Expiration      string `json:"Expiration"`
 }
 
 type ListResultEntry struct {
@@ -46,9 +59,82 @@ type SyncProfileItem struct {
 	RoleName  string `json:"roleName"`
 }
 
-// --- login ---
+// --- login (auth-only) ---
 
 func handleLogin(ctx context.Context, c *cli.Command) error {
+	opts := getGlobalOptions(c)
+
+	ssoStartURL := c.String("sso-start-url")
+	ssoRegion := c.String("sso-region")
+	if ssoRegion == "" {
+		ssoRegion = "ap-northeast-1"
+	}
+
+	// Resolve start URL from existing config if not provided
+	if ssoStartURL == "" {
+		cfg, err := config.Load()
+		if err == nil {
+			if profileName := c.String("profile"); profileName != "" {
+				p := cfg.GetProfile(profileName)
+				if p == nil {
+					return fmt.Errorf("profile %q not found", profileName)
+				}
+				if !p.IsSSO {
+					return fmt.Errorf("profile %q is not an SSO profile", profileName)
+				}
+				ssoStartURL = cfg.ResolveStartURL(p)
+				if r := cfg.ResolveRegion(p); r != "" {
+					ssoRegion = r
+				}
+			}
+			if ssoStartURL == "" {
+				ssoStartURL = cfg.GetSSOStartURL()
+			}
+		}
+	}
+
+	if ssoStartURL == "" {
+		return fmt.Errorf("cannot determine SSO start URL. Use --sso-start-url or configure profiles first")
+	}
+
+	// Check if already authenticated
+	if token, err := sso.GetTokenForStartURL(ssoStartURL); err == nil {
+		if opts.JSON {
+			return emitJSON(LoginResult{
+				StartURL:  ssoStartURL,
+				ExpiresAt: token.ExpiresAt.Format("2006-01-02T15:04:05Z"),
+			})
+		}
+		fmt.Printf("✓ Already authenticated (expires: %s)\n", token.ExpiresAt.Format("2006-01-02 15:04:05"))
+		return nil
+	}
+
+	if opts.JSON {
+		return fmt.Errorf("no valid SSO session found. Run 'aws-sso-login login' interactively first")
+	}
+
+	// Trigger browser login
+	if err := sso.RunSSOLogin(ctx, ssoStartURL, ssoRegion); err != nil {
+		return fmt.Errorf("SSO login failed: %w", err)
+	}
+
+	token, err := sso.GetTokenForStartURL(ssoStartURL)
+	if err != nil {
+		return fmt.Errorf("failed to retrieve token after login: %w", err)
+	}
+
+	if opts.JSON {
+		return emitJSON(LoginResult{
+			StartURL:  ssoStartURL,
+			ExpiresAt: token.ExpiresAt.Format("2006-01-02T15:04:05Z"),
+		})
+	}
+	return nil
+}
+
+// --- use (profile selection + AWS_PROFILE export) ---
+
+func handleUse(ctx context.Context, c *cli.Command) error {
 	opts := getGlobalOptions(c)
 
 	cfg, err := config.Load()
@@ -64,17 +150,24 @@ func handleLogin(ctx context.Context, c *cli.Command) error {
 	var selectedProfile *config.Profile
 
 	if profileName := c.String("profile"); profileName != "" {
-		for _, p := range ssoProfiles {
-			if p.Name == profileName {
-				selectedProfile = p
-				break
-			}
-		}
+		selectedProfile = cfg.GetProfile(profileName)
 		if selectedProfile == nil {
 			return fmt.Errorf("profile %q not found", profileName)
 		}
+		if !selectedProfile.IsSSO {
+			return fmt.Errorf("profile %q is not an SSO profile", profileName)
+		}
+	} else if c.Args().Len() > 0 {
+		name := c.Args().First()
+		selectedProfile = cfg.GetProfile(name)
+		if selectedProfile == nil {
+			return fmt.Errorf("profile %q not found", name)
+		}
+		if !selectedProfile.IsSSO {
+			return fmt.Errorf("profile %q is not an SSO profile", name)
+		}
 	} else if opts.JSON {
-		return fmt.Errorf("--profile is required when using --json")
+		return fmt.Errorf("--profile or positional argument is required when using --json")
 	} else if c.Bool("read-only") {
 		roProfiles := make([]*config.Profile, 0)
 		for _, p := range ssoProfiles {
@@ -96,26 +189,132 @@ func handleLogin(ctx context.Context, c *cli.Command) error {
 		}
 	}
 
+	// Auto-login if no valid session
 	startURL := cfg.ResolveStartURL(selectedProfile)
-	client := sso.NewClient()
-	if err := client.Login(ctx, selectedProfile, startURL); err != nil {
-		return fmt.Errorf("SSO login failed: %w", err)
+	ssoRegion := cfg.ResolveRegion(selectedProfile)
+	if startURL != "" {
+		if _, tokenErr := sso.GetTokenForStartURL(startURL); tokenErr != nil {
+			if fallbackToken, fallbackErr := sso.GetLatestToken(); fallbackErr != nil {
+				if opts.JSON {
+					return fmt.Errorf("no valid SSO session. Run 'aws-sso-login login' first")
+				}
+				logInfo("No valid SSO session. Starting login...")
+				if loginErr := sso.RunSSOLogin(ctx, startURL, ssoRegion); loginErr != nil {
+					return fmt.Errorf("SSO login failed: %w", loginErr)
+				}
+			} else if fallbackToken.StartURL != startURL {
+				logInfo("Warning: Using token for %s instead of %s", fallbackToken.StartURL, startURL)
+			}
+		}
+	}
+
+	if c.Bool("export") {
+		fmt.Printf("export AWS_PROFILE=%s\n", selectedProfile.Name)
+		return nil
 	}
 
 	if opts.JSON {
-		return emitJSON(LoginResult{
+		return emitJSON(UseResult{
 			Profile:   selectedProfile.Name,
 			AccountID: selectedProfile.SSOAccountID,
 			RoleName:  selectedProfile.SSORoleName,
 		})
 	}
 
-	fmt.Printf("✓ Successfully logged in to profile: %s\n", selectedProfile.Name)
+	fmt.Printf("Selected profile: %s\n", selectedProfile.Name)
 	fmt.Printf("  Account: %s\n", selectedProfile.SSOAccountID)
 	fmt.Printf("  Role: %s\n", selectedProfile.SSORoleName)
-	fmt.Printf("\nTo use this profile:\n")
+	fmt.Printf("\nTo activate:\n")
 	fmt.Printf("  export AWS_PROFILE=%s\n", selectedProfile.Name)
+	fmt.Printf("\nOr use: eval $(aws-sso-login use %s --export)\n", selectedProfile.Name)
 	return nil
+}
+
+// --- creds (scoped temporary credentials) ---
+
+func handleCreds(ctx context.Context, c *cli.Command) error {
+	opts := getGlobalOptions(c)
+
+	cfg, err := config.Load()
+	if err != nil {
+		return fmt.Errorf("failed to load AWS config: %w", err)
+	}
+
+	// Resolve profile
+	profileName := c.String("profile")
+	if profileName == "" && c.Args().Len() > 0 {
+		profileName = c.Args().First()
+	}
+	if profileName == "" {
+		profileName = os.Getenv("AWS_PROFILE")
+	}
+	if profileName == "" {
+		return fmt.Errorf("profile is required: use --profile, positional argument, or AWS_PROFILE")
+	}
+
+	profile := cfg.GetProfile(profileName)
+	if profile == nil {
+		return fmt.Errorf("profile %q not found", profileName)
+	}
+	if !profile.IsSSO {
+		return fmt.Errorf("profile %q is not an SSO profile", profileName)
+	}
+
+	startURL := cfg.ResolveStartURL(profile)
+	ssoRegion := cfg.ResolveRegion(profile)
+
+	// Resolve SSO token
+	var token *sso.CachedToken
+	token, err = sso.GetTokenForStartURL(startURL)
+	if err != nil {
+		token, err = sso.GetLatestToken()
+		if err != nil {
+			if opts.JSON || c.String("format") == "json" {
+				return fmt.Errorf("no valid SSO session. Run 'aws-sso-login login' first")
+			}
+			logInfo("No valid SSO session. Starting login...")
+			if loginErr := sso.RunSSOLogin(ctx, startURL, ssoRegion); loginErr != nil {
+				return fmt.Errorf("SSO login failed: %w", loginErr)
+			}
+			token, err = sso.GetTokenForStartURL(startURL)
+			if err != nil {
+				token, err = sso.GetLatestToken()
+				if err != nil {
+					return fmt.Errorf("failed to get SSO token after login: %w", err)
+				}
+			}
+		} else if token.StartURL != startURL {
+			logInfo("Warning: Using token for %s instead of %s", token.StartURL, startURL)
+		}
+	}
+
+	creds, err := sso.GetRoleCredentials(ctx, token.AccessToken, profile.SSOAccountID, profile.SSORoleName, ssoRegion)
+	if err != nil {
+		return fmt.Errorf("failed to get role credentials: %w", err)
+	}
+
+	format := c.String("format")
+	if c.Bool("export") {
+		format = "export"
+	}
+
+	switch format {
+	case "json":
+		return emitJSON(CredentialProcessOutput{
+			Version:         1,
+			AccessKeyID:     creds.AccessKeyID,
+			SecretAccessKey: creds.SecretAccessKey,
+			SessionToken:    creds.SessionToken,
+			Expiration:      creds.Expiration.Format("2006-01-02T15:04:05Z"),
+		})
+	case "export":
+		fmt.Printf("export AWS_ACCESS_KEY_ID=%s\n", creds.AccessKeyID)
+		fmt.Printf("export AWS_SECRET_ACCESS_KEY=%s\n", creds.SecretAccessKey)
+		fmt.Printf("export AWS_SESSION_TOKEN=%s\n", creds.SessionToken)
+		return nil
+	default:
+		return fmt.Errorf("invalid --format %q (allowed: export, json)", format)
+	}
 }
 
 func selectProfileInteractive(profiles []*config.Profile) (*config.Profile, error) {
