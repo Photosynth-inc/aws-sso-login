@@ -80,6 +80,11 @@ func main() {
 						Usage: "SSO region",
 						Value: "ap-northeast-1",
 					},
+					&cli.BoolFlag{
+						Name:    "force",
+						Aliases: []string{"f"},
+						Usage:   "Force re-authentication even if a valid session exists",
+					},
 				},
 			},
 			{
