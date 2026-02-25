@@ -97,16 +97,18 @@ func handleLogin(ctx context.Context, c *cli.Command) error {
 		return fmt.Errorf("cannot determine SSO start URL. Use --sso-start-url or configure profiles first")
 	}
 
-	// Check if already authenticated
-	if token, err := sso.GetTokenForStartURL(ssoStartURL); err == nil {
-		if opts.JSON {
-			return emitJSON(LoginResult{
-				StartURL:  ssoStartURL,
-				ExpiresAt: token.ExpiresAt.Format("2006-01-02T15:04:05Z"),
-			})
+	// Check if already authenticated (skip when --force is specified)
+	if !c.Bool("force") {
+		if token, err := sso.GetTokenForStartURL(ssoStartURL); err == nil {
+			if opts.JSON {
+				return emitJSON(LoginResult{
+					StartURL:  ssoStartURL,
+					ExpiresAt: token.ExpiresAt.Format("2006-01-02T15:04:05Z"),
+				})
+			}
+			fmt.Printf("✓ Already authenticated (expires: %s)\n", token.ExpiresAt.Format("2006-01-02 15:04:05"))
+			return nil
 		}
-		fmt.Printf("✓ Already authenticated (expires: %s)\n", token.ExpiresAt.Format("2006-01-02 15:04:05"))
-		return nil
 	}
 
 	if opts.JSON {
