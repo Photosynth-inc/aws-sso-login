@@ -61,6 +61,10 @@ func TestIsAWSCLICommand(t *testing.T) {
 		{"/usr/local/bin/aws s3 ls", true},
 		{"AWS_PROFILE=admin aws s3 ls", true},
 		{"AWS_PROFILE=admin KEY=val aws s3 ls", true},
+		// lowercase env var prefix
+		{"foo=1 aws s3 ls", true},
+		// quoted env var value with spaces
+		{`AWS_CA_BUNDLE="/tmp/my cert.pem" aws s3 ls`, true},
 		{"terraform apply --profile prod", false},
 		{"kubectl get pods --profile dev", false},
 		{"python script.py --profile prod", false},

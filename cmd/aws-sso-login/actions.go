@@ -573,19 +573,22 @@ var reProfile = regexp.MustCompile(`--profile(?:=|\s+)(?:"([^"]+)"|'([^']+)'|(\S
 // Capturing groups: 1=double-quoted, 2=single-quoted, 3=unquoted.
 var reAWSProfileEnv = regexp.MustCompile(`(?:^|\s)AWS_PROFILE=(?:"([^"]+)"|'([^']+)'|(\S+))`)
 
-// reEnvVarToken matches a shell environment variable assignment token (KEY=value).
-var reEnvVarToken = regexp.MustCompile(`^[A-Z_][A-Z0-9_]*=`)
+// reFirstCommand matches the first real command after any leading KEY=value env var assignments.
+// It handles quoted values (including spaces) and case-insensitive key names.
+// Capture group 1 is the command token itself.
+var reFirstCommand = regexp.MustCompile(
+	`^(?:[A-Za-z_][A-Za-z0-9_]*=(?:"[^"]*"|'[^']*'|\S*)\s+)*(\S+)`,
+)
 
 // isAWSCLICommand returns true if the shell command invokes the AWS CLI.
 // It skips leading KEY=VALUE environment variable assignments to find the actual command.
 func isAWSCLICommand(command string) bool {
-	for _, token := range strings.Fields(command) {
-		if reEnvVarToken.MatchString(token) {
-			continue
-		}
-		return token == "aws" || strings.HasSuffix(token, "/aws")
+	m := reFirstCommand.FindStringSubmatch(strings.TrimSpace(command))
+	if len(m) < 2 {
+		return false
 	}
-	return false
+	cmd := m[1]
+	return cmd == "aws" || strings.HasSuffix(cmd, "/aws")
 }
 
 // extractLastProfile returns the last --profile value in a shell command string.
