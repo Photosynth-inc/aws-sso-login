@@ -569,11 +569,53 @@ const exitCodePolicyViolation = 2
 // Capturing groups: 1=double-quoted, 2=single-quoted, 3=unquoted.
 var reProfile = regexp.MustCompile(`--profile(?:=|\s+)(?:"([^"]+)"|'([^']+)'|(\S+))`)
 
+// reAWSProfileEnv matches an inline AWS_PROFILE=value assignment in a shell command.
+// Capturing groups: 1=double-quoted, 2=single-quoted, 3=unquoted.
+var reAWSProfileEnv = regexp.MustCompile(`(?:^|\s)AWS_PROFILE=(?:"([^"]+)"|'([^']+)'|(\S+))`)
+
+// reEnvVarToken matches a shell environment variable assignment token (KEY=value).
+var reEnvVarToken = regexp.MustCompile(`^[A-Z_][A-Z0-9_]*=`)
+
+// isAWSCLICommand returns true if the shell command invokes the AWS CLI.
+// It skips leading KEY=VALUE environment variable assignments to find the actual command.
+func isAWSCLICommand(command string) bool {
+	for _, token := range strings.Fields(command) {
+		if reEnvVarToken.MatchString(token) {
+			continue
+		}
+		return token == "aws" || strings.HasSuffix(token, "/aws")
+	}
+	return false
+}
+
 // extractLastProfile returns the last --profile value in a shell command string.
 // It handles both --profile=value and --profile value forms, and strips surrounding quotes.
 // Returns ("", false) when no --profile flag is present.
 func extractLastProfile(command string) (string, bool) {
 	matches := reProfile.FindAllStringSubmatch(command, -1)
+	if len(matches) == 0 {
+		return "", false
+	}
+	last := matches[len(matches)-1]
+	switch {
+	case last[1] != "":
+		return last[1], true // double-quoted
+	case last[2] != "":
+		return last[2], true // single-quoted
+	default:
+		return last[3], true // unquoted
+	}
+}
+
+// extractAWSProfile returns the effective AWS profile for a command.
+// --profile flag takes precedence over AWS_PROFILE= inline assignment,
+// matching actual AWS CLI precedence rules.
+// Returns ("", false) when no profile is specified by either method.
+func extractAWSProfile(command string) (string, bool) {
+	if profile, ok := extractLastProfile(command); ok {
+		return profile, true
+	}
+	matches := reAWSProfileEnv.FindAllStringSubmatch(command, -1)
 	if len(matches) == 0 {
 		return "", false
 	}
@@ -614,7 +656,11 @@ func runGuard(readOnly, failOpen bool, r io.Reader) (bool, string) {
 	if !readOnly {
 		return false, ""
 	}
-	profile, ok := extractLastProfile(payload.ToolInput.Command)
+	cmd := payload.ToolInput.Command
+	if !isAWSCLICommand(cmd) {
+		return false, ""
+	}
+	profile, ok := extractAWSProfile(cmd)
 	if !ok {
 		return false, ""
 	}
