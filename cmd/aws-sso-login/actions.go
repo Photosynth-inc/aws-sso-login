@@ -2,8 +2,12 @@ package main
 
 import (
 	"context"
+	"encoding/json"
+	"errors"
 	"fmt"
+	"io"
 	"os"
+	"regexp"
 	"strings"
 
 	"github.com/Photosynth-inc/aws-sso-login/internal/config"
@@ -541,6 +545,102 @@ func handleList(ctx context.Context, c *cli.Command) error {
 		}
 	}
 	return nil
+}
+
+// --- guard ---
+
+// guardHookPayload is the common envelope sent via stdin by Claude Code, Cursor, and Codex hooks.
+type guardHookPayload struct {
+	HookEventName string `json:"hook_event_name"`
+
+	// PreToolUse fields (Claude Code / Cursor)
+	ToolName  string `json:"tool_name"`
+	ToolInput struct {
+		Command string `json:"command"`
+	} `json:"tool_input"`
+}
+
+// exitCodePolicyViolation is returned when guard blocks an action.
+// Claude Code and Cursor both treat exit 2 as a hard block.
+// Codex will support the same convention once PreToolUse lands (openai/codex#13498).
+const exitCodePolicyViolation = 2
+
+// reProfile matches --profile=value or --profile value, with optional quoting.
+// Capturing groups: 1=double-quoted, 2=single-quoted, 3=unquoted.
+var reProfile = regexp.MustCompile(`--profile(?:=|\s+)(?:"([^"]+)"|'([^']+)'|(\S+))`)
+
+// extractLastProfile returns the last --profile value in a shell command string.
+// It handles both --profile=value and --profile value forms, and strips surrounding quotes.
+// Returns ("", false) when no --profile flag is present.
+func extractLastProfile(command string) (string, bool) {
+	matches := reProfile.FindAllStringSubmatch(command, -1)
+	if len(matches) == 0 {
+		return "", false
+	}
+	last := matches[len(matches)-1]
+	switch {
+	case last[1] != "":
+		return last[1], true // double-quoted
+	case last[2] != "":
+		return last[2], true // single-quoted
+	default:
+		return last[3], true // unquoted
+	}
+}
+
+// runGuard is the testable core of handleGuard.
+// Returns (blocked, profileName): blocked=true means the action must be denied.
+// profileName is set when a specific non-readonly profile triggered the block.
+func runGuard(readOnly, failOpen bool, r io.Reader) (bool, string) {
+	var payload guardHookPayload
+	if err := json.NewDecoder(r).Decode(&payload); err != nil {
+		if errors.Is(err, io.EOF) {
+			return false, "" // empty stdin — not a hook invocation
+		}
+		// Malformed JSON: fail-closed when --readonly-only, unless --fail-open.
+		if readOnly && !failOpen {
+			return true, ""
+		}
+		return false, ""
+	}
+
+	switch payload.HookEventName {
+	case "PreToolUse", "preToolUse":
+		// Claude Code / Cursor (and Codex once openai/codex#13498 lands).
+	default:
+		return false, ""
+	}
+
+	if !readOnly {
+		return false, ""
+	}
+	profile, ok := extractLastProfile(payload.ToolInput.Command)
+	if !ok {
+		return false, ""
+	}
+	if !strings.HasSuffix(profile, "-ro") {
+		return true, profile
+	}
+	return false, ""
+}
+
+func handleGuard(_ context.Context, c *cli.Command) error {
+	// If stdin is a terminal (manual invocation, not a hook), skip all checks.
+	if fi, err := os.Stdin.Stat(); err == nil && fi.Mode()&os.ModeCharDevice != 0 {
+		return nil
+	}
+
+	blocked, profile := runGuard(c.Bool("readonly-only"), c.Bool("fail-open"), os.Stdin)
+	if !blocked {
+		return nil
+	}
+
+	if profile != "" {
+		fmt.Fprintf(os.Stderr, "BLOCKED: profile %q is not allowed. Only read-only profiles (ending with -ro) are permitted.\n", profile)
+	} else {
+		fmt.Fprintf(os.Stderr, "BLOCKED: could not parse hook payload (fail-closed). Use --fail-open to allow on parse errors.\n")
+	}
+	return &ExitError{Code: exitCodePolicyViolation, Err: fmt.Errorf("policy violation"), Silent: true}
 }
 
 // --- status ---

@@ -30,6 +30,7 @@ go install github.com/Photosynth-inc/aws-sso-login/cmd/aws-sso-login@latest
 | `sync` | Generate profiles from Identity Center |
 | `list` | List available AWS profiles |
 | `status` | Check session validity |
+| `guard` | Enforce access policy for AI agent tool calls (PreToolUse hook) |
 
 ## Usage
 
@@ -140,10 +141,43 @@ For AI agents (Claude Code, etc.), use `creds` to limit credential scope:
 eval $(aws-sso-login creds myapp-dev-ro)
 ```
 
+### guard — PreToolUse hook
+
+Use `guard` as a PreToolUse hook to block AWS CLI calls that use a non-read-only profile:
+
+**Claude Code** (`~/.claude/settings.json`):
+```json
+{
+  "hooks": {
+    "PreToolUse": [{
+      "matcher": "Bash",
+      "hooks": [{ "type": "command", "command": "aws-sso-login guard --readonly-only" }]
+    }]
+  }
+}
+```
+
+**Cursor** (`~/.cursor/hooks.json`):
+```json
+{
+  "hooks": {
+    "preToolUse": [{
+      "matcher": { "tool": "Bash" },
+      "hooks": [{ "type": "command", "command": "aws-sso-login guard --readonly-only" }]
+    }]
+  }
+}
+```
+
+**Options:**
+- `--readonly-only`: Block AWS CLI calls using a profile that does not end with `-ro`
+- `--fail-open`: Allow the action when the hook payload cannot be parsed (default: block)
+
+> **Note**: `guard` enforces the `-ro` suffix convention at the hook layer. It does not prevent `AWS_PROFILE=admin aws ...` style overrides. See [docs/security-model.md](docs/security-model.md) for the full threat model.
+
 For stronger isolation, combine with:
-1. Claude Code hooks to block `~/.aws/sso/cache/` reads
-2. Container / separate OS user
-3. AWS Permission Boundaries (server-side, authoritative)
+1. Container / separate OS user
+2. AWS Permission Boundaries (server-side, authoritative)
 
 See [docs/security-model.md](docs/security-model.md) for the full threat model.
 

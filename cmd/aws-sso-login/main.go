@@ -165,6 +165,21 @@ func main() {
 				Usage:  "Show session status",
 				Action: handleStatus,
 			},
+			{
+				Name:   "guard",
+				Usage:  "Enforce access policy for AI agent tool calls (use as a PreToolUse hook)",
+				Action: handleGuard,
+				Flags: []cli.Flag{
+					&cli.BoolFlag{
+						Name:  "readonly-only",
+						Usage: "Block AWS CLI calls using a non-read-only profile (profiles not ending in -ro)",
+					},
+					&cli.BoolFlag{
+						Name:  "fail-open",
+						Usage: "Allow the action when the hook payload cannot be parsed (default: block when --readonly-only)",
+					},
+				},
+			},
 		},
 		Action: handleDefault,
 	}

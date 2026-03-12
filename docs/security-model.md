@@ -33,9 +33,18 @@ For `creds` to effectively limit an agent's permissions, **all** of the followin
 |-------|-----------------|------------------------|
 | `creds` subcommand | SSO token in env vars | File read of `~/.aws/sso/cache/`, `AWS_PROFILE=` override, profile arg abuse |
 | `credential_process` only config | Profile switching to admin | Config rewrite, cache file read |
+| `guard --readonly-only` (PreToolUse hook) | `--profile non-ro` in Bash tool calls | `AWS_PROFILE=admin aws ...` env-var override, non-Bash tool calls |
 | Claude Code hook (block cache read) | Direct cache file access | Indirect access via creative bash |
 | Container / separate user | All file-based bypass | Nothing (strongest) |
 | AWS Permission Boundary (server-side) | All write actions regardless of credential source | Nothing (authoritative) |
+
+### `guard` limitations
+
+`guard` inspects the `--profile` flag in the Bash command string. It does NOT catch:
+
+1. `AWS_PROFILE=admin aws s3 rm ...` — environment variable override in the same command
+2. Profile switching via other tools or SDKs that read `~/.aws/config` directly
+3. Commands that do not use `--profile` but inherit a privileged profile from the environment
 
 ## Conclusion
 
