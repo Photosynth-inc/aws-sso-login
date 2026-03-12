@@ -155,6 +155,13 @@ func TestRunGuardReadonlyOnly(t *testing.T) {
 
 		// wrong event name → allowed
 		{"wrong event", `{"hook_event_name":"SessionStart","tool_input":{"command":"aws s3 ls --profile prod"}}`, true, false, false},
+
+		// chained commands — bypass attempts that must be blocked
+		{"block export then aws", makePayload(`export AWS_PROFILE=admin; aws s3 ls`), true, false, true},
+		{"block standalone assign &&", makePayload(`AWS_PROFILE=admin && aws s3 ls`), true, false, true},
+		{"block nested bash -c", makePayload(`bash -lc 'aws s3 ls --profile admin'`), true, false, true},
+		{"allow nested bash -c ro", makePayload(`bash -c 'aws s3 ls --profile prod-ro'`), true, false, false},
+		{"block pipe aws", makePayload(`echo x | aws s3 cp - s3://bucket --profile prod`), true, false, true},
 	}
 
 	for _, tt := range tests {

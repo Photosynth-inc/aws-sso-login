@@ -633,44 +633,59 @@ func extractAWSProfile(command string) (string, bool) {
 	}
 }
 
-// runGuard is the testable core of handleGuard.
-// Returns (blocked, profileName): blocked=true means the action must be denied.
-// profileName is set when a specific non-readonly profile triggered the block.
-func runGuard(readOnly, failOpen bool, r io.Reader) (bool, string) {
+// analyzeGuard parses the hook payload from r and analyses the command string
+// using the shell AST. It returns the Finding and the profile name (if known).
+func analyzeGuard(readOnly, failOpen bool, r io.Reader) (Finding, string) {
 	var payload guardHookPayload
 	if err := json.NewDecoder(r).Decode(&payload); err != nil {
 		if errors.Is(err, io.EOF) {
-			return false, "" // empty stdin — not a hook invocation
+			return Finding{Verdict: VerdictAllow}, "" // empty stdin — not a hook invocation
 		}
 		// Malformed JSON: fail-closed when --readonly-only, unless --fail-open.
 		if readOnly && !failOpen {
-			return true, ""
+			return Finding{Verdict: VerdictBlock, Reason: "malformed hook payload (fail-closed)"}, ""
 		}
-		return false, ""
+		return Finding{Verdict: VerdictAllow}, ""
 	}
 
 	switch payload.HookEventName {
 	case "PreToolUse", "preToolUse":
 		// Claude Code / Cursor (and Codex once openai/codex#13498 lands).
 	default:
-		return false, ""
+		return Finding{Verdict: VerdictAllow}, ""
 	}
 
 	if !readOnly {
-		return false, ""
+		return Finding{Verdict: VerdictAllow}, ""
 	}
-	cmd := payload.ToolInput.Command
-	if !isAWSCLICommand(cmd) {
-		return false, ""
+
+	f := AnalyzeCommand(payload.ToolInput.Command)
+
+	// Treat Unknown as Block when fail-closed.
+	if f.Verdict == VerdictUnknown && !failOpen {
+		return Finding{Verdict: VerdictBlock, Reason: f.Reason}, ""
 	}
-	profile, ok := extractAWSProfile(cmd)
-	if !ok {
-		return false, ""
-	}
-	if !strings.HasSuffix(profile, "-ro") {
-		return true, profile
-	}
-	return false, ""
+	return f, f.Profile
+}
+
+// runGuard is the testable core of handleGuard.
+// Returns (blocked, profileName): blocked=true means the action must be denied.
+// profileName is set when a specific non-readonly profile triggered the block.
+func runGuard(readOnly, failOpen bool, r io.Reader) (bool, string) {
+	f, profile := analyzeGuard(readOnly, failOpen, r)
+	return f.Verdict == VerdictBlock, profile
+}
+
+// guardAskResponse is the JSON written to stdout when --on-violation=ask is set.
+// Claude Code reads this and shows a confirmation dialog to the user.
+type guardAskResponse struct {
+	HookSpecificOutput guardAskOutput `json:"hookSpecificOutput"`
+}
+
+type guardAskOutput struct {
+	HookEventName          string `json:"hookEventName"`
+	PermissionDecision     string `json:"permissionDecision"`
+	PermissionDecisionReason string `json:"permissionDecisionReason"`
 }
 
 func handleGuard(_ context.Context, c *cli.Command) error {
@@ -679,15 +694,38 @@ func handleGuard(_ context.Context, c *cli.Command) error {
 		return nil
 	}
 
-	blocked, profile := runGuard(c.Bool("readonly-only"), c.Bool("fail-open"), os.Stdin)
-	if !blocked {
+	f, profile := analyzeGuard(c.Bool("readonly-only"), c.Bool("fail-open"), os.Stdin)
+	if f.Verdict != VerdictBlock {
 		return nil
 	}
 
+	onViolation := c.String("on-violation")
+
+	if onViolation == "ask" {
+		reason := "Non-read-only AWS profile detected"
+		if profile != "" {
+			reason = fmt.Sprintf("Profile %q is not read-only (must end with -ro)", profile)
+		} else if f.Reason != "" {
+			reason = f.Reason
+		}
+		resp := guardAskResponse{
+			HookSpecificOutput: guardAskOutput{
+				HookEventName:            "PreToolUse",
+				PermissionDecision:       "ask",
+				PermissionDecisionReason: reason,
+			},
+		}
+		if err := json.NewEncoder(os.Stdout).Encode(resp); err != nil {
+			return fmt.Errorf("failed to write ask response: %w", err)
+		}
+		return nil
+	}
+
+	// Default: hard block (exit 2).
 	if profile != "" {
 		fmt.Fprintf(os.Stderr, "BLOCKED: profile %q is not allowed. Only read-only profiles (ending with -ro) are permitted.\n", profile)
 	} else {
-		fmt.Fprintf(os.Stderr, "BLOCKED: could not parse hook payload (fail-closed). Use --fail-open to allow on parse errors.\n")
+		fmt.Fprintf(os.Stderr, "BLOCKED: %s. Use --fail-open to allow on parse errors.\n", f.Reason)
 	}
 	return &ExitError{Code: exitCodePolicyViolation, Err: fmt.Errorf("policy violation"), Silent: true}
 }

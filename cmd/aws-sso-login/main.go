@@ -178,6 +178,11 @@ func main() {
 						Name:  "fail-open",
 						Usage: "Allow the action when the hook payload cannot be parsed (default: block when --readonly-only)",
 					},
+					&cli.StringFlag{
+						Name:  "on-violation",
+						Value: "block",
+						Usage: "Action on policy violation: 'block' (exit 2) or 'ask' (prompt user via Claude Code dialog)",
+					},
 				},
 			},
 		},
