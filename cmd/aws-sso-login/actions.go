@@ -70,6 +70,7 @@ func handleLogin(ctx context.Context, c *cli.Command) error {
 
 	ssoStartURL := c.String("sso-start-url")
 	ssoRegion := c.String("sso-region")
+	ssoSession := ""
 	if ssoRegion == "" {
 		ssoRegion = "ap-northeast-1"
 	}
@@ -87,12 +88,16 @@ func handleLogin(ctx context.Context, c *cli.Command) error {
 					return fmt.Errorf("profile %q is not an SSO profile", profileName)
 				}
 				ssoStartURL = cfg.ResolveStartURL(p)
+				ssoSession = p.SSOSession
 				if r := cfg.ResolveRegion(p); r != "" {
 					ssoRegion = r
 				}
 			}
 			if ssoStartURL == "" {
 				ssoStartURL = cfg.GetSSOStartURL()
+			}
+			if ssoSession == "" && len(cfg.SSOSessions) > 0 {
+				ssoSession = cfg.SSOSessions[0].Name
 			}
 		}
 	}
@@ -104,14 +109,17 @@ func handleLogin(ctx context.Context, c *cli.Command) error {
 	// Check if already authenticated (skip when --force is specified)
 	if !c.Bool("force") {
 		if token, err := sso.GetTokenForStartURL(ssoStartURL); err == nil {
-			if opts.JSON {
-				return emitJSON(LoginResult{
-					StartURL:  ssoStartURL,
-					ExpiresAt: token.ExpiresAt.Format("2006-01-02T15:04:05Z"),
-				})
+			if validateErr := sso.ValidateToken(ctx, token.AccessToken, ssoRegion); validateErr == nil {
+				if opts.JSON {
+					return emitJSON(LoginResult{
+						StartURL:  ssoStartURL,
+						ExpiresAt: token.ExpiresAt.Format("2006-01-02T15:04:05Z"),
+					})
+				}
+				fmt.Printf("✓ Already authenticated (expires: %s)\n", token.ExpiresAt.Format("2006-01-02 15:04:05"))
+				return nil
 			}
-			fmt.Printf("✓ Already authenticated (expires: %s)\n", token.ExpiresAt.Format("2006-01-02 15:04:05"))
-			return nil
+			// Token exists in cache but AWS rejected it — fall through to re-login.
 		}
 	}
 
@@ -120,7 +128,7 @@ func handleLogin(ctx context.Context, c *cli.Command) error {
 	}
 
 	// Trigger browser login
-	if err := sso.RunSSOLogin(ctx, ssoStartURL, ssoRegion); err != nil {
+	if err := sso.RunSSOLogin(ctx, ssoStartURL, ssoRegion, ssoSession); err != nil {
 		return fmt.Errorf("SSO login failed: %w", err)
 	}
 
@@ -205,7 +213,7 @@ func handleUse(ctx context.Context, c *cli.Command) error {
 					return fmt.Errorf("no valid SSO session. Run 'aws-sso-login login' first")
 				}
 				logInfo("No valid SSO session. Starting login...")
-				if loginErr := sso.RunSSOLogin(ctx, startURL, ssoRegion); loginErr != nil {
+				if loginErr := sso.RunSSOLogin(ctx, startURL, ssoRegion, selectedProfile.SSOSession); loginErr != nil {
 					return fmt.Errorf("SSO login failed: %w", loginErr)
 				}
 			} else if fallbackToken.StartURL != startURL {
@@ -279,7 +287,7 @@ func handleCreds(ctx context.Context, c *cli.Command) error {
 				return fmt.Errorf("no valid SSO session. Run 'aws-sso-login login' first")
 			}
 			logInfo("No valid SSO session. Starting login...")
-			if loginErr := sso.RunSSOLogin(ctx, startURL, ssoRegion); loginErr != nil {
+			if loginErr := sso.RunSSOLogin(ctx, startURL, ssoRegion, profile.SSOSession); loginErr != nil {
 				return fmt.Errorf("SSO login failed: %w", loginErr)
 			}
 			token, err = sso.GetTokenForStartURL(startURL)
@@ -417,7 +425,7 @@ func handleSync(ctx context.Context, c *cli.Command) error {
 				return fmt.Errorf("no valid SSO session found. Run 'aws-sso-login login' first")
 			}
 			logInfo("No valid SSO session found. Starting SSO login...")
-			if loginErr := sso.RunSSOLogin(ctx, ssoStartURL, ssoRegion); loginErr != nil {
+			if loginErr := sso.RunSSOLogin(ctx, ssoStartURL, ssoRegion, ""); loginErr != nil {
 				return fmt.Errorf("SSO login failed: %w", loginErr)
 			}
 			token, err = sso.GetTokenForStartURL(ssoStartURL)
