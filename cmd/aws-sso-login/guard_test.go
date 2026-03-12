@@ -57,11 +57,11 @@ func TestRunGuardReadonlyOnly(t *testing.T) {
 	}
 
 	tests := []struct {
-		name       string
-		stdin      string
-		readOnly   bool
-		failOpen   bool
-		wantBlock  bool
+		name      string
+		stdin     string
+		readOnly  bool
+		failOpen  bool
+		wantBlock bool
 	}{
 		// non-ro profile → blocked when --readonly-only
 		{"block non-ro", makePayload("prod"), true, false, true},
