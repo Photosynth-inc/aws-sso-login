@@ -16,8 +16,19 @@ func writeFakeConfig(t *testing.T, content string) string {
 	return path
 }
 
-func TestLoadFrom_SSOSessionRegion(t *testing.T) {
-	path := writeFakeConfig(t, `
+func mustLoadConfig(t *testing.T, content string) *Config {
+	t.Helper()
+	cfg, err := LoadFrom(writeFakeConfig(t, content))
+	if err != nil {
+		t.Fatalf("LoadFrom: %v", err)
+	}
+	return cfg
+}
+
+// --- LoadFrom ---
+
+func TestLoadFrom_ParsesSSOSession(t *testing.T) {
+	cfg := mustLoadConfig(t, `
 [sso-session prod-sso]
 sso_start_url = https://prod.awsapps.com/start/
 sso_region = eu-west-1
@@ -28,11 +39,6 @@ sso_session = prod-sso
 sso_account_id = 111111111111
 sso_role_name = AdministratorAccess
 `)
-	cfg, err := LoadFrom(path)
-	if err != nil {
-		t.Fatalf("LoadFrom: %v", err)
-	}
-
 	if len(cfg.SSOSessions) != 1 {
 		t.Fatalf("expected 1 sso-session, got %d", len(cfg.SSOSessions))
 	}
@@ -48,89 +54,8 @@ sso_role_name = AdministratorAccess
 	}
 }
 
-func TestGetSSOSession(t *testing.T) {
-	path := writeFakeConfig(t, `
-[sso-session staging-sso]
-sso_start_url = https://staging.awsapps.com/start/
-sso_region = ap-southeast-1
-`)
-	cfg, err := LoadFrom(path)
-	if err != nil {
-		t.Fatalf("LoadFrom: %v", err)
-	}
-
-	got := cfg.GetSSOSession("staging-sso")
-	if got == nil {
-		t.Fatal("GetSSOSession returned nil")
-	}
-	if got.Region != "ap-southeast-1" {
-		t.Errorf("Region = %q, want ap-southeast-1", got.Region)
-	}
-
-	if cfg.GetSSOSession("nonexistent") != nil {
-		t.Error("expected nil for unknown session")
-	}
-}
-
-// TestHandleLoginSSORegion verifies that the fix for Bug 1 works at the config
-// level: when the first sso-session has a non-default region, GetSSOSession
-// returns that region and can be used to override the hardcoded default.
-func TestHandleLoginSSORegion(t *testing.T) {
-	path := writeFakeConfig(t, `
-[sso-session ops-sso]
-sso_start_url = https://ops.awsapps.com/start/
-sso_region = us-east-1
-`)
-	cfg, err := LoadFrom(path)
-	if err != nil {
-		t.Fatalf("LoadFrom: %v", err)
-	}
-
-	// Simulate the fixed handleLogin logic (Bug 1 fix)
-	ssoRegion := "ap-northeast-1" // hardcoded default before fix
-	ssoSession := ""
-	if len(cfg.SSOSessions) > 0 {
-		ssoSession = cfg.SSOSessions[0].Name
-		if sess := cfg.GetSSOSession(ssoSession); sess != nil && sess.Region != "" {
-			ssoRegion = sess.Region
-		}
-	}
-
-	if ssoSession != "ops-sso" {
-		t.Errorf("ssoSession = %q, want ops-sso", ssoSession)
-	}
-	if ssoRegion != "us-east-1" {
-		t.Errorf("ssoRegion = %q, want us-east-1 (should override hardcoded default)", ssoRegion)
-	}
-}
-
-// TestHandleSyncSSOSession verifies that the fix for Bug 2 works at the config
-// level: ssoSession is resolved from config.SSOSessions[0] so it is passed
-// correctly to RunSSOLogin (non-empty), ensuring AWS-CLI-v2-compatible cache key.
-func TestHandleSyncSSOSession(t *testing.T) {
-	path := writeFakeConfig(t, `
-[sso-session engineering-sso]
-sso_start_url = https://eng.awsapps.com/start/
-sso_region = ap-northeast-1
-`)
-	cfg, err := LoadFrom(path)
-	if err != nil {
-		t.Fatalf("LoadFrom: %v", err)
-	}
-
-	// Simulate the fixed handleSync logic (Bug 2 fix)
-	ssoSession := ""
-	if len(cfg.SSOSessions) > 0 {
-		ssoSession = cfg.SSOSessions[0].Name
-	}
-
-	if ssoSession != "engineering-sso" {
-		t.Errorf("ssoSession = %q, want engineering-sso (empty string would use wrong cache key)", ssoSession)
-	}
-}
-
 func TestLoadFrom_MultipleSSOSessions(t *testing.T) {
-	path := writeFakeConfig(t, `
+	cfg := mustLoadConfig(t, `
 [sso-session primary-sso]
 sso_start_url = https://primary.awsapps.com/start/
 sso_region = us-west-2
@@ -139,22 +64,189 @@ sso_region = us-west-2
 sso_start_url = https://secondary.awsapps.com/start/
 sso_region = eu-central-1
 `)
-	cfg, err := LoadFrom(path)
-	if err != nil {
-		t.Fatalf("LoadFrom: %v", err)
-	}
-
 	if len(cfg.SSOSessions) != 2 {
 		t.Fatalf("expected 2 sso-sessions, got %d", len(cfg.SSOSessions))
 	}
+	if got := cfg.GetSSOSession("primary-sso"); got == nil || got.Region != "us-west-2" {
+		t.Errorf("primary-sso: %v", got)
+	}
+	if got := cfg.GetSSOSession("secondary-sso"); got == nil || got.Region != "eu-central-1" {
+		t.Errorf("secondary-sso: %v", got)
+	}
+}
 
-	primary := cfg.GetSSOSession("primary-sso")
-	if primary == nil || primary.Region != "us-west-2" {
-		t.Errorf("primary-sso region = %v", primary)
+func TestLoadFrom_FileNotFound(t *testing.T) {
+	_, err := LoadFrom("/nonexistent/path/config")
+	if err == nil {
+		t.Fatal("expected error for missing file")
+	}
+}
+
+// --- GetSSOSession / GetProfile ---
+
+func TestGetSSOSession(t *testing.T) {
+	cfg := mustLoadConfig(t, `
+[sso-session staging-sso]
+sso_start_url = https://staging.awsapps.com/start/
+sso_region = ap-southeast-1
+`)
+	got := cfg.GetSSOSession("staging-sso")
+	if got == nil {
+		t.Fatal("GetSSOSession returned nil")
+	}
+	if got.Region != "ap-southeast-1" {
+		t.Errorf("Region = %q, want ap-southeast-1", got.Region)
+	}
+	if cfg.GetSSOSession("nonexistent") != nil {
+		t.Error("expected nil for unknown session")
+	}
+}
+
+func TestGetProfile(t *testing.T) {
+	cfg := mustLoadConfig(t, `
+[profile ops]
+sso_session = ops-sso
+sso_account_id = 222222222222
+sso_role_name = ReadOnly
+`)
+	if cfg.GetProfile("ops") == nil {
+		t.Error("expected to find profile ops")
+	}
+	if cfg.GetProfile("missing") != nil {
+		t.Error("expected nil for unknown profile")
+	}
+}
+
+func TestGetSSOProfiles(t *testing.T) {
+	cfg := mustLoadConfig(t, `
+[profile sso-profile]
+sso_session = some-sso
+sso_account_id = 123456789012
+sso_role_name = Admin
+
+[profile plain-profile]
+region = us-east-1
+output = json
+`)
+	ssoProfiles := cfg.GetSSOProfiles()
+	if len(ssoProfiles) != 1 || ssoProfiles[0].Name != "sso-profile" {
+		t.Errorf("GetSSOProfiles = %v", ssoProfiles)
+	}
+}
+
+// --- ResolveRegion ---
+
+func TestResolveRegion(t *testing.T) {
+	cfg := mustLoadConfig(t, `
+[sso-session ops-sso]
+sso_start_url = https://ops.awsapps.com/start/
+sso_region = us-east-1
+
+[profile via-session]
+sso_session = ops-sso
+sso_account_id = 111111111111
+sso_role_name = Admin
+
+[profile direct-region]
+sso_start_url = https://ops.awsapps.com/start/
+sso_region = ap-northeast-1
+sso_account_id = 111111111111
+sso_role_name = Admin
+`)
+	// Profile with sso_session: inherits region from the session
+	p := cfg.GetProfile("via-session")
+	if got := cfg.ResolveRegion(p); got != "us-east-1" {
+		t.Errorf("ResolveRegion(via-session) = %q, want us-east-1", got)
 	}
 
-	secondary := cfg.GetSSOSession("secondary-sso")
-	if secondary == nil || secondary.Region != "eu-central-1" {
-		t.Errorf("secondary-sso region = %v", secondary)
+	// Profile with sso_region set directly: uses own value
+	p2 := cfg.GetProfile("direct-region")
+	if got := cfg.ResolveRegion(p2); got != "ap-northeast-1" {
+		t.Errorf("ResolveRegion(direct-region) = %q, want ap-northeast-1", got)
+	}
+}
+
+func TestResolveRegion_EmptyWhenNoRegion(t *testing.T) {
+	cfg := mustLoadConfig(t, `
+[profile no-region]
+sso_start_url = https://example.awsapps.com/start/
+sso_account_id = 111111111111
+sso_role_name = Admin
+`)
+	p := cfg.GetProfile("no-region")
+	if got := cfg.ResolveRegion(p); got != "" {
+		t.Errorf("ResolveRegion = %q, want empty", got)
+	}
+}
+
+// --- ResolveStartURL ---
+
+func TestResolveStartURL(t *testing.T) {
+	cfg := mustLoadConfig(t, `
+[sso-session eng-sso]
+sso_start_url = https://eng.awsapps.com/start/
+sso_region = ap-northeast-1
+
+[profile via-session]
+sso_session = eng-sso
+sso_account_id = 111111111111
+sso_role_name = Admin
+
+[profile direct-url]
+sso_start_url = https://direct.awsapps.com/start/
+sso_account_id = 222222222222
+sso_role_name = Admin
+`)
+	// sso_session profile: resolves from session
+	p := cfg.GetProfile("via-session")
+	if got := cfg.ResolveStartURL(p); got != "https://eng.awsapps.com/start/" {
+		t.Errorf("ResolveStartURL(via-session) = %q", got)
+	}
+
+	// direct sso_start_url: uses own value (takes precedence)
+	p2 := cfg.GetProfile("direct-url")
+	if got := cfg.ResolveStartURL(p2); got != "https://direct.awsapps.com/start/" {
+		t.Errorf("ResolveStartURL(direct-url) = %q", got)
+	}
+}
+
+// --- GetSSOStartURL ---
+
+func TestGetSSOStartURL_PrefersSession(t *testing.T) {
+	cfg := mustLoadConfig(t, `
+[sso-session primary-sso]
+sso_start_url = https://session.awsapps.com/start/
+sso_region = us-west-2
+
+[profile fallback]
+sso_start_url = https://profile.awsapps.com/start/
+sso_account_id = 111111111111
+sso_role_name = Admin
+`)
+	// sso-session takes priority over profile-level sso_start_url
+	if got := cfg.GetSSOStartURL(); got != "https://session.awsapps.com/start/" {
+		t.Errorf("GetSSOStartURL = %q, want session URL", got)
+	}
+}
+
+func TestGetSSOStartURL_FallsBackToProfile(t *testing.T) {
+	cfg := mustLoadConfig(t, `
+[profile only-profile]
+sso_start_url = https://profile.awsapps.com/start/
+sso_account_id = 111111111111
+sso_role_name = Admin
+`)
+	if got := cfg.GetSSOStartURL(); got != "https://profile.awsapps.com/start/" {
+		t.Errorf("GetSSOStartURL = %q, want profile URL", got)
+	}
+}
+
+func TestGetSSOStartURL_EmptyWhenNone(t *testing.T) {
+	cfg := mustLoadConfig(t, `
+[profile plain]
+region = us-east-1
+`)
+	if got := cfg.GetSSOStartURL(); got != "" {
+		t.Errorf("GetSSOStartURL = %q, want empty", got)
 	}
 }
