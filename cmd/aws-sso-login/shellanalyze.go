@@ -139,7 +139,7 @@ func analyzeRecursive(src string, depth int) Finding {
 			}
 		case "unknown":
 			out = worsen(out, Finding{Verdict: VerdictUnknown, Reason: "profile value is dynamic"})
-		// "none": no profile specified — allow (default profile unknown)
+			// "none": no profile specified — allow (default profile unknown)
 		}
 		return true
 	})
