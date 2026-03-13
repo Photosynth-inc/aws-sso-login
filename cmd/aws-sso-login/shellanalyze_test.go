@@ -11,52 +11,55 @@ func TestAnalyzeCommand(t *testing.T) {
 		command string
 		verdict Verdict
 	}{
-		// basic: single aws call
+		// basic: single aws call — varied profiles to prevent hardcoding
 		{"aws s3 ls --profile prod", VerdictBlock},
+		{"aws s3 ls --profile staging", VerdictBlock},
+		{"aws s3 ls --profile engineering", VerdictBlock},
 		{"aws s3 ls --profile prod-ro", VerdictAllow},
+		{"aws s3 ls --profile staging-ro", VerdictAllow},
 		{"aws s3 ls", VerdictAllow},
 		{"terraform apply --profile prod", VerdictAllow},
 		{"echo hello", VerdictAllow},
 		{"", VerdictAllow},
 
 		// inline env assignment
-		{"AWS_PROFILE=admin aws s3 ls", VerdictBlock},
-		{"AWS_PROFILE=admin-ro aws s3 ls", VerdictAllow},
+		{"AWS_PROFILE=ops aws s3 ls", VerdictBlock},
+		{"AWS_PROFILE=ops-ro aws s3 ls", VerdictAllow},
 
 		// chained with ; and &&
-		{"export AWS_PROFILE=admin; aws s3 ls", VerdictBlock},
-		{"AWS_PROFILE=admin && aws s3 ls", VerdictBlock},
+		{"export AWS_PROFILE=staging; aws s3 ls", VerdictBlock},
+		{"AWS_PROFILE=dev && aws s3 ls", VerdictBlock},
 		{"echo hi; aws s3 ls --profile prod", VerdictBlock},
 
 		// Critical fix: temporal ordering — export after aws must NOT propagate back
-		{"aws s3 ls; export AWS_PROFILE=admin", VerdictAllow},
-		{"export AWS_PROFILE=admin; aws s3 ls; export AWS_PROFILE=dev-ro", VerdictBlock},
+		{"aws s3 ls; export AWS_PROFILE=prod", VerdictAllow},
+		{"export AWS_PROFILE=prod; aws s3 ls; export AWS_PROFILE=prod-ro", VerdictBlock},
 
 		// nested shell
-		{"bash -lc 'aws s3 ls --profile admin'", VerdictBlock},
+		{"bash -lc 'aws s3 ls --profile staging'", VerdictBlock},
 		{"bash -c 'aws s3 ls --profile prod-ro'", VerdictAllow},
-		{"sh -c 'aws s3 ls --profile admin'", VerdictBlock},
+		{"sh -c 'aws s3 ls --profile engineering'", VerdictBlock},
 
 		// wrappers: env
-		{"env AWS_PROFILE=admin aws s3 ls", VerdictBlock},
-		{"env AWS_PROFILE=admin-ro aws s3 ls", VerdictAllow},
-		{"env -i AWS_PROFILE=admin aws s3 ls", VerdictBlock},
+		{"env AWS_PROFILE=ops aws s3 ls", VerdictBlock},
+		{"env AWS_PROFILE=ops-ro aws s3 ls", VerdictAllow},
+		{"env -i AWS_PROFILE=prod aws s3 ls", VerdictBlock},
 
 		// wrappers: command
-		{"command aws s3 ls --profile admin", VerdictBlock},
+		{"command aws s3 ls --profile staging", VerdictBlock},
 		{"command aws s3 ls --profile prod-ro", VerdictAllow},
 
 		// wrappers: sudo
-		{"sudo aws s3 ls --profile admin", VerdictBlock},
+		{"sudo aws s3 ls --profile ops", VerdictBlock},
 		{"sudo aws s3 ls --profile prod-ro", VerdictAllow},
-		{"sudo -n aws s3 ls --profile admin", VerdictBlock},
+		{"sudo -n aws s3 ls --profile engineering", VerdictBlock},
 
 		// High: dynamic command name → Unknown (fail-closed = Block)
-		{"c=aws; $c s3 ls --profile admin", VerdictUnknown},
+		{"c=aws; $c s3 ls --profile staging", VerdictUnknown},
 
 		// Medium: dynamic --profile value → Unknown
 		{"aws s3 ls --profile=$P", VerdictUnknown},
-		{"P=admin; aws s3 ls --profile=$P", VerdictUnknown},
+		{"P=prod; aws s3 ls --profile=$P", VerdictUnknown},
 
 		// nested shell with dynamic -c arg → Unknown
 		{"bash -c $CMD", VerdictUnknown},
@@ -65,10 +68,10 @@ func TestAnalyzeCommand(t *testing.T) {
 		{`/bin/sh -c "$CMD"`, VerdictUnknown},
 
 		// resolveWrappers: nice -n takes a value argument
-		{"nice -n 5 aws s3 ls --profile admin", VerdictBlock},
+		{"nice -n 5 aws s3 ls --profile engineering", VerdictBlock},
 
 		// resolveWrappers: sudo --user takes a value (long option form)
-		{"sudo --user ec2-user aws s3 ls --profile admin", VerdictBlock},
+		{"sudo --user ec2-user aws s3 ls --profile ops", VerdictBlock},
 
 		// wordHasPrefix: quoted --profile=$P
 		{`aws s3 ls "--profile=$P"`, VerdictUnknown},
@@ -76,8 +79,21 @@ func TestAnalyzeCommand(t *testing.T) {
 		// shellHasCFlag: --rcfile contains 'c' but is not a -c flag
 		{"bash --rcfile ~/.bashrc", VerdictAllow},
 
-		// empty AWS_PROFILE resets ambient — should not block
-		{"export AWS_PROFILE=admin; env AWS_PROFILE= aws s3 ls", VerdictAllow},
+		// env empty AWS_PROFILE resets ambient — should not block
+		{"export AWS_PROFILE=staging; env AWS_PROFILE= aws s3 ls", VerdictAllow},
+
+		// Round-2: ambient propagation to nested shell (Critical fix)
+		{"export AWS_PROFILE=prod; bash -c 'aws s3 ls'", VerdictBlock},
+		{"AWS_PROFILE=staging sh -c 'aws s3 ls'", VerdictBlock},
+
+		// Round-2: subshell scope isolation (High fix)
+		{"(export AWS_PROFILE=ops); aws s3 ls", VerdictAllow},
+
+		// Round-2: inline empty assignment resets ambient (Medium fix)
+		{"export AWS_PROFILE=engineering; AWS_PROFILE= aws s3 ls", VerdictAllow},
+
+		// Round-2: DblQuoted dynamic prefix detection (Medium fix)
+		{`aws s3 ls "--pro${X}file=$P"`, VerdictUnknown},
 	}
 
 	for _, tt := range tests {

@@ -35,7 +35,7 @@ func AnalyzeCommand(src string) Finding {
 	if !quickHit(src) {
 		return Finding{Verdict: VerdictAllow}
 	}
-	return analyzeRecursive(src, 0)
+	return analyzeRecursive(src, 0, "")
 }
 
 // quickHit is a fast pre-filter: if none of these keywords appear there is
@@ -52,7 +52,11 @@ func quickHit(cmd string) bool {
 		strings.Contains(cmd, "dash") ||
 		strings.Contains(cmd, "/sh") ||
 		strings.HasPrefix(cmd, "sh ") ||
-		strings.Contains(cmd, " sh ")
+		strings.HasPrefix(cmd, "sh\t") ||
+		strings.Contains(cmd, " sh ") ||
+		strings.Contains(cmd, "\tsh ") ||
+		strings.Contains(cmd, " sh\t") ||
+		strings.Contains(cmd, "\tsh\t")
 }
 
 // worsen returns whichever Finding has the higher (more severe) Verdict.
@@ -63,7 +67,7 @@ func worsen(a, b Finding) Finding {
 	return a
 }
 
-func analyzeRecursive(src string, depth int) Finding {
+func analyzeRecursive(src string, depth int, inheritedAmbient string) Finding {
 	if depth > maxAnalyzeDepth || len(src) > maxCommandLen {
 		return Finding{Verdict: VerdictUnknown, Reason: "depth/size limit exceeded"}
 	}
@@ -74,46 +78,62 @@ func analyzeRecursive(src string, depth int) Finding {
 		return Finding{Verdict: VerdictUnknown, Reason: "shell parse error"}
 	}
 
-	// Single-pass Walk in document order.
-	// `ambient` tracks the last AWS_PROFILE value set by a preceding assignment
-	// in the same command sequence. It is updated in-place as we visit nodes,
-	// so later assignments do not affect earlier aws invocations. This correctly
-	// handles `export A; aws ...; export B` by using A (not B) for the aws call.
+	return walkStmts(f.Stmts, inheritedAmbient, depth)
+}
+
+// walkStmts processes a list of statements in document order, tracking
+// AWS_PROFILE assignments as ambient context. Subshells are analysed in an
+// isolated scope so their assignments do not propagate to the outer ambient.
+func walkStmts(stmts []*syntax.Stmt, inheritedAmbient string, depth int) Finding {
+	if depth > maxAnalyzeDepth {
+		return Finding{Verdict: VerdictUnknown, Reason: "depth/size limit exceeded"}
+	}
+
 	out := Finding{Verdict: VerdictAllow}
-	ambient := ""
+	ambient := inheritedAmbient
 
-	syntax.Walk(f, func(n syntax.Node) bool {
-		switch node := n.(type) {
-		case *syntax.DeclClause:
-			// export AWS_PROFILE=admin  /  declare -x AWS_PROFILE=admin
-			if node.Variant.Value != "export" && node.Variant.Value != "declare" {
-				return true
-			}
-			for _, assign := range node.Args {
-				if assign.Name == nil || assign.Name.Value != "AWS_PROFILE" || assign.Value == nil {
-					continue
-				}
-				if val, ok := wordStatic(assign.Value); ok {
-					ambient = val
-				}
-			}
+	for _, stmt := range stmts {
+		syntax.Walk(stmt, func(n syntax.Node) bool {
+			switch node := n.(type) {
+			case *syntax.Subshell:
+				// Isolated scope: export/declare inside must not leak to outer ambient.
+				out = worsen(out, walkStmts(node.Stmts, ambient, depth+1))
+				return false // prevent outer walk from descending into subshell
 
-		case *syntax.CallExpr:
-			if len(node.Args) == 0 {
-				// Standalone assignment: AWS_PROFILE=admin
-				for _, assign := range node.Assigns {
-					if assign.Name.Value == "AWS_PROFILE" && assign.Value != nil {
-						if val, ok := wordStatic(assign.Value); ok {
+			case *syntax.DeclClause:
+				// export AWS_PROFILE=admin  /  declare -x AWS_PROFILE=admin
+				if node.Variant.Value != "export" && node.Variant.Value != "declare" {
+					return true
+				}
+				for _, assign := range node.Args {
+					if assign.Name == nil || assign.Name.Value != "AWS_PROFILE" || assign.Value == nil {
+						continue
+					}
+					if val, ok := wordStatic(assign.Value); ok {
+						ambient = val
+					}
+				}
+
+			case *syntax.CallExpr:
+				if len(node.Args) == 0 {
+					// Standalone assignment: AWS_PROFILE=admin or AWS_PROFILE=
+					for _, assign := range node.Assigns {
+						if assign.Name.Value != "AWS_PROFILE" {
+							continue
+						}
+						if assign.Value == nil {
+							ambient = "" // explicitly unsets
+						} else if val, ok := wordStatic(assign.Value); ok {
 							ambient = val
 						}
 					}
+					return true
 				}
-				return true
+				out = worsen(out, inspectCall(node, ambient, depth))
 			}
-			out = worsen(out, inspectCall(node, ambient, depth))
-		}
-		return true
-	})
+			return true
+		})
+	}
 	return out
 }
 
@@ -146,7 +166,20 @@ func inspectCall(call *syntax.CallExpr, ambient string, depth int) Finding {
 	if isShellInterpreter(cmd) {
 		inner, found := extractShellCArg(remainingArgs)
 		if found {
-			return analyzeRecursive(inner, depth+1)
+			// Propagate effectiveAmbient and inline assigns (AWS_PROFILE=x sh -c '...')
+			// into the nested shell analysis.
+			shellAmbient := effectiveAmbient
+			for _, assign := range call.Assigns {
+				if assign.Name.Value != "AWS_PROFILE" || assign.Value == nil {
+					continue
+				}
+				val, ok := wordStatic(assign.Value)
+				if !ok {
+					return Finding{Verdict: VerdictUnknown, Reason: "dynamic AWS_PROFILE for nested shell"}
+				}
+				shellAmbient = val
+			}
+			return analyzeRecursive(inner, depth+1, shellAmbient)
 		}
 		// -c flag present but argument is dynamic.
 		if shellHasCFlag(remainingArgs) {
@@ -342,9 +375,11 @@ func wordStatic(w *syntax.Word) (string, bool) {
 }
 
 // wordHasPrefix reports whether the accumulated static prefix of a Word starts
-// with the given prefix. It concatenates consecutive literal parts (Lit,
-// SglQuoted, DblQuoted with only Lit inside) until a dynamic part is reached,
-// then checks the prefix. This handles `"--profile=$P"` and `'--profile='$P`.
+// with the given prefix. It concatenates consecutive literal parts until a
+// dynamic part is reached, then checks conservatively: if the accumulated static
+// part is itself a prefix of the target prefix (could still become --profile=
+// after dynamic expansion), it returns true. This handles `"--profile=$P"` and
+// `"--pro${X}file=$P"`.
 func wordHasPrefix(w *syntax.Word, prefix string) bool {
 	var b strings.Builder
 	for _, part := range w.Parts {
@@ -357,12 +392,16 @@ func wordHasPrefix(w *syntax.Word, prefix string) bool {
 			for _, inner := range p.Parts {
 				lit, ok := inner.(*syntax.Lit)
 				if !ok {
-					return strings.HasPrefix(b.String(), prefix)
+					acc := b.String()
+					// Conservative: if what we have so far is a prefix of the target
+					// (meaning dynamic content could complete it), report a match.
+					return strings.HasPrefix(acc, prefix) || strings.HasPrefix(prefix, acc)
 				}
 				b.WriteString(lit.Value)
 			}
 		default:
-			return strings.HasPrefix(b.String(), prefix)
+			acc := b.String()
+			return strings.HasPrefix(acc, prefix) || strings.HasPrefix(prefix, acc)
 		}
 	}
 	return strings.HasPrefix(b.String(), prefix)
@@ -434,9 +473,16 @@ func shellHasCFlag(args []*syntax.Word) bool {
 func effectiveProfileFromCall(call *syntax.CallExpr, ambient string) (profile, state string) {
 	// Inline env assignments (lowest priority, overridden by --profile flag).
 	inlineProfile := ""
+	inlineProfileSet := false
 	inlineDynamic := false
 	for _, assign := range call.Assigns {
-		if assign.Name.Value != "AWS_PROFILE" || assign.Value == nil {
+		if assign.Name.Value != "AWS_PROFILE" {
+			continue
+		}
+		if assign.Value == nil {
+			// AWS_PROFILE= (nil value): explicitly unsets — treat as empty, don't fall to ambient.
+			inlineProfileSet = true
+			inlineProfile = ""
 			continue
 		}
 		val, ok := wordStatic(assign.Value)
@@ -445,6 +491,7 @@ func effectiveProfileFromCall(call *syntax.CallExpr, ambient string) (profile, s
 			continue
 		}
 		inlineProfile = val
+		inlineProfileSet = true
 	}
 
 	// Scan args for --profile flag (last occurrence wins, matching AWS CLI behaviour).
@@ -455,7 +502,7 @@ func effectiveProfileFromCall(call *syntax.CallExpr, ambient string) (profile, s
 	for i := 1; i < len(args); i++ {
 		s, ok := wordStatic(args[i])
 		if !ok {
-			// --profile=$VAR or "--profile=$VAR": flag present but value dynamic.
+			// --profile=$VAR or "--profile=$P": flag present but value dynamic.
 			if wordHasPrefix(args[i], "--profile=") {
 				flagFound = true
 				flagDynamic = true
@@ -489,7 +536,10 @@ func effectiveProfileFromCall(call *syntax.CallExpr, ambient string) (profile, s
 		return flagProfile, "known"
 	case inlineDynamic:
 		return "", "unknown"
-	case inlineProfile != "":
+	case inlineProfileSet && inlineProfile == "":
+		// Explicitly unset (AWS_PROFILE=): treat as "no profile", don't fall to ambient.
+		return "", "none"
+	case inlineProfileSet:
 		return inlineProfile, "known"
 	case ambient != "":
 		return ambient, "known"
