@@ -40,7 +40,8 @@ func AnalyzeCommand(src string) Finding {
 
 // quickHit is a fast pre-filter: if none of these keywords appear there is
 // nothing for the guard to check. Shell interpreters are included because
-// `bash -c $DYNAMIC` can hide AWS invocations.
+// `bash -c $DYNAMIC` can hide AWS invocations. Full-path forms (/bin/sh,
+// /usr/bin/bash, etc.) are covered by the "/sh" and "/bash" checks.
 func quickHit(cmd string) bool {
 	return strings.Contains(cmd, "aws") ||
 		strings.Contains(cmd, "AWS_PROFILE") ||
@@ -49,6 +50,7 @@ func quickHit(cmd string) bool {
 		strings.Contains(cmd, "zsh") ||
 		strings.Contains(cmd, "ksh") ||
 		strings.Contains(cmd, "dash") ||
+		strings.Contains(cmd, "/sh") ||
 		strings.HasPrefix(cmd, "sh ") ||
 		strings.Contains(cmd, " sh ")
 }
@@ -128,15 +130,16 @@ func inspectCall(call *syntax.CallExpr, ambient string, depth int) Finding {
 		return Finding{Verdict: VerdictUnknown, Reason: "dynamic command name"}
 	}
 
-	cmd, remainingArgs, envProfile := resolveWrappers(firstWord, call.Args)
+	cmd, remainingArgs, envProfile, envProfileSet := resolveWrappers(firstWord, call.Args)
 	if cmd == "" {
 		// Wrapper present but inner command is dynamic.
 		return Finding{Verdict: VerdictUnknown, Reason: "dynamic command after wrapper"}
 	}
 
 	// env VAR=val overrides ambient for the wrapped command.
+	// envProfileSet is true even when AWS_PROFILE was explicitly set to "".
 	effectiveAmbient := ambient
-	if envProfile != "" {
+	if envProfileSet {
 		effectiveAmbient = envProfile
 	}
 
@@ -171,58 +174,78 @@ func inspectCall(call *syntax.CallExpr, ambient string, depth int) Finding {
 
 // resolveWrappers iteratively strips transparent command wrappers
 // (env, command, sudo, time, nice) from args, returning the real command,
-// its argument list (including the command itself as args[0]), and any
-// AWS_PROFILE value set via env-style arguments.
-// Returns ("", nil, envProfile) when the inner command cannot be determined.
-func resolveWrappers(cmd string, args []*syntax.Word) (realCmd string, realArgs []*syntax.Word, envProfile string) {
+// its argument list (including the command itself as args[0]), any
+// AWS_PROFILE value set via env-style arguments, and whether AWS_PROFILE
+// was explicitly set (envProfileSet is true even for empty values).
+// Returns ("", nil, "", false) when the inner command cannot be determined.
+func resolveWrappers(cmd string, args []*syntax.Word) (realCmd string, realArgs []*syntax.Word, envProfile string, envProfileSet bool) {
 	for {
 		base := lastPathComponent(cmd)
 		switch base {
-		case "command", "time", "nice":
+		case "command", "time":
 			rest := skipBoolFlags(args[1:])
 			if len(rest) == 0 {
-				return "", nil, envProfile
+				return "", nil, envProfile, envProfileSet
 			}
 			next, ok := wordStatic(rest[0])
 			if !ok {
-				return "", nil, envProfile
+				return "", nil, envProfile, envProfileSet
+			}
+			cmd = next
+			args = rest
+
+		case "nice":
+			// -n takes a numeric adjustment value.
+			rest := skipMixedFlags(args[1:], map[string]bool{"-n": true})
+			if len(rest) == 0 {
+				return "", nil, envProfile, envProfileSet
+			}
+			next, ok := wordStatic(rest[0])
+			if !ok {
+				return "", nil, envProfile, envProfileSet
 			}
 			cmd = next
 			args = rest
 
 		case "sudo":
 			valueFlagSet := map[string]bool{
-				"-u": true, "-g": true, "-C": true, "-D": true,
-				"-p": true, "-r": true, "-t": true,
+				"-u": true, "--user": true,
+				"-g": true, "--group": true,
+				"-C": true,
+				"-D": true, "--chdir": true,
+				"-p": true, "--prompt": true,
+				"-r": true, "--role": true,
+				"-t": true, "--type": true,
 			}
 			rest := skipMixedFlags(args[1:], valueFlagSet)
 			if len(rest) == 0 {
-				return "", nil, envProfile
+				return "", nil, envProfile, envProfileSet
 			}
 			next, ok := wordStatic(rest[0])
 			if !ok {
-				return "", nil, envProfile
+				return "", nil, envProfile, envProfileSet
 			}
 			cmd = next
 			args = rest
 
 		case "env":
-			rest, profile := parseEnvPrefix(args[1:])
-			if profile != "" {
+			rest, profile, profileSet := parseEnvPrefix(args[1:])
+			if profileSet {
 				envProfile = profile
+				envProfileSet = true
 			}
 			if len(rest) == 0 {
-				return "", nil, envProfile
+				return "", nil, envProfile, envProfileSet
 			}
 			next, ok := wordStatic(rest[0])
 			if !ok {
-				return "", nil, envProfile
+				return "", nil, envProfile, envProfileSet
 			}
 			cmd = next
 			args = rest
 
 		default:
-			return cmd, args, envProfile
+			return cmd, args, envProfile, envProfileSet
 		}
 	}
 }
@@ -264,8 +287,9 @@ func skipMixedFlags(args []*syntax.Word, valueTaking map[string]bool) []*syntax.
 }
 
 // parseEnvPrefix consumes leading env flags and VAR=val assignments, returning
-// the remaining args and any AWS_PROFILE value found.
-func parseEnvPrefix(args []*syntax.Word) (remaining []*syntax.Word, awsProfile string) {
+// the remaining args, any AWS_PROFILE value found, and whether AWS_PROFILE was
+// explicitly set (awsProfileSet is true even when the value is empty).
+func parseEnvPrefix(args []*syntax.Word) (remaining []*syntax.Word, awsProfile string, awsProfileSet bool) {
 	for len(args) > 0 {
 		s, ok := wordStatic(args[0])
 		if !ok {
@@ -282,13 +306,14 @@ func parseEnvPrefix(args []*syntax.Word) (remaining []*syntax.Word, awsProfile s
 		if idx := strings.Index(s, "="); idx > 0 {
 			if s[:idx] == "AWS_PROFILE" {
 				awsProfile = s[idx+1:]
+				awsProfileSet = true
 			}
 			args = args[1:]
 			continue
 		}
 		break
 	}
-	return args, awsProfile
+	return args, awsProfile, awsProfileSet
 }
 
 // wordStatic returns the literal string value of a Word node when it contains
@@ -316,14 +341,31 @@ func wordStatic(w *syntax.Word) (string, bool) {
 	return b.String(), true
 }
 
-// wordHasLitPrefix reports whether the Word's first part is a Lit with the given prefix.
-// Used to detect `--profile=$VAR` where the value is dynamic but the flag name is static.
-func wordHasLitPrefix(w *syntax.Word, prefix string) bool {
-	if len(w.Parts) == 0 {
-		return false
+// wordHasPrefix reports whether the accumulated static prefix of a Word starts
+// with the given prefix. It concatenates consecutive literal parts (Lit,
+// SglQuoted, DblQuoted with only Lit inside) until a dynamic part is reached,
+// then checks the prefix. This handles `"--profile=$P"` and `'--profile='$P`.
+func wordHasPrefix(w *syntax.Word, prefix string) bool {
+	var b strings.Builder
+	for _, part := range w.Parts {
+		switch p := part.(type) {
+		case *syntax.Lit:
+			b.WriteString(p.Value)
+		case *syntax.SglQuoted:
+			b.WriteString(p.Value)
+		case *syntax.DblQuoted:
+			for _, inner := range p.Parts {
+				lit, ok := inner.(*syntax.Lit)
+				if !ok {
+					return strings.HasPrefix(b.String(), prefix)
+				}
+				b.WriteString(lit.Value)
+			}
+		default:
+			return strings.HasPrefix(b.String(), prefix)
+		}
 	}
-	lit, ok := w.Parts[0].(*syntax.Lit)
-	return ok && strings.HasPrefix(lit.Value, prefix)
+	return strings.HasPrefix(b.String(), prefix)
 }
 
 // isShellInterpreter returns true for common shell interpreter names.
@@ -342,11 +384,15 @@ func isAWSBinary(cmd string) bool {
 
 // extractShellCArg extracts the command string from `bash -c '...'` / `sh -lc '...'`.
 // args[0] is expected to be the shell interpreter name.
+// Long options (--foo) are excluded; only short option clusters (-c, -lc) are matched.
 func extractShellCArg(args []*syntax.Word) (string, bool) {
 	for i := 1; i < len(args); i++ {
 		s, ok := wordStatic(args[i])
 		if !ok {
 			continue
+		}
+		if strings.HasPrefix(s, "--") {
+			continue // long option, not a -c cluster
 		}
 		if strings.HasPrefix(s, "-") && strings.ContainsRune(s, 'c') {
 			if i+1 < len(args) {
@@ -359,12 +405,19 @@ func extractShellCArg(args []*syntax.Word) (string, bool) {
 	return "", false
 }
 
-// shellHasCFlag reports whether any arg looks like a -c flag (possibly combined,
-// e.g. -lc). Used to detect `bash -c $CMD` where the argument is dynamic.
+// shellHasCFlag reports whether any arg is a short option cluster containing -c
+// (e.g. -c, -lc). Long options (--rcfile, etc.) are excluded.
+// Used to detect `bash -c $CMD` where the argument is dynamic.
 func shellHasCFlag(args []*syntax.Word) bool {
 	for _, arg := range args {
 		s, ok := wordStatic(arg)
-		if ok && strings.HasPrefix(s, "-") && strings.ContainsRune(s, 'c') {
+		if !ok {
+			continue
+		}
+		if strings.HasPrefix(s, "--") {
+			continue // long option, not a -c cluster
+		}
+		if strings.HasPrefix(s, "-") && strings.ContainsRune(s, 'c') {
 			return true
 		}
 	}
@@ -402,8 +455,8 @@ func effectiveProfileFromCall(call *syntax.CallExpr, ambient string) (profile, s
 	for i := 1; i < len(args); i++ {
 		s, ok := wordStatic(args[i])
 		if !ok {
-			// --profile=$VAR: flag is present but value is dynamic.
-			if wordHasLitPrefix(args[i], "--profile=") {
+			// --profile=$VAR or "--profile=$VAR": flag present but value dynamic.
+			if wordHasPrefix(args[i], "--profile=") {
 				flagFound = true
 				flagDynamic = true
 			}

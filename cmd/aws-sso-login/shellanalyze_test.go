@@ -60,6 +60,24 @@ func TestAnalyzeCommand(t *testing.T) {
 
 		// nested shell with dynamic -c arg → Unknown
 		{"bash -c $CMD", VerdictUnknown},
+
+		// quickHit: full path shell interpreter must not be missed
+		{`/bin/sh -c "$CMD"`, VerdictUnknown},
+
+		// resolveWrappers: nice -n takes a value argument
+		{"nice -n 5 aws s3 ls --profile admin", VerdictBlock},
+
+		// resolveWrappers: sudo --user takes a value (long option form)
+		{"sudo --user ec2-user aws s3 ls --profile admin", VerdictBlock},
+
+		// wordHasPrefix: quoted --profile=$P
+		{`aws s3 ls "--profile=$P"`, VerdictUnknown},
+
+		// shellHasCFlag: --rcfile contains 'c' but is not a -c flag
+		{"bash --rcfile ~/.bashrc", VerdictAllow},
+
+		// empty AWS_PROFILE resets ambient — should not block
+		{"export AWS_PROFILE=admin; env AWS_PROFILE= aws s3 ls", VerdictAllow},
 	}
 
 	for _, tt := range tests {
