@@ -98,6 +98,9 @@ func handleLogin(ctx context.Context, c *cli.Command) error {
 			}
 			if ssoSession == "" && len(cfg.SSOSessions) > 0 {
 				ssoSession = cfg.SSOSessions[0].Name
+				if sess := cfg.GetSSOSession(ssoSession); sess != nil && sess.Region != "" {
+					ssoRegion = sess.Region
+				}
 			}
 		}
 	}
@@ -397,6 +400,7 @@ func handleSync(ctx context.Context, c *cli.Command) error {
 	ssoStartURL := c.String("sso-start-url")
 	ssoRegion := c.String("sso-region")
 	defaultRegion := c.String("default-region")
+	ssoSession := ""
 
 	if ssoStartURL == "" {
 		cfg, err := config.Load()
@@ -404,6 +408,14 @@ func handleSync(ctx context.Context, c *cli.Command) error {
 			ssoStartURL = cfg.GetSSOStartURL()
 			if ssoStartURL != "" {
 				logInfo("Using SSO start URL from existing config: %s", ssoStartURL)
+			}
+			if len(cfg.SSOSessions) > 0 {
+				ssoSession = cfg.SSOSessions[0].Name
+				if ssoRegion == "" {
+					if sess := cfg.GetSSOSession(ssoSession); sess != nil && sess.Region != "" {
+						ssoRegion = sess.Region
+					}
+				}
 			}
 		}
 	}
@@ -425,7 +437,7 @@ func handleSync(ctx context.Context, c *cli.Command) error {
 				return fmt.Errorf("no valid SSO session found. Run 'aws-sso-login login' first")
 			}
 			logInfo("No valid SSO session found. Starting SSO login...")
-			if loginErr := sso.RunSSOLogin(ctx, ssoStartURL, ssoRegion, ""); loginErr != nil {
+			if loginErr := sso.RunSSOLogin(ctx, ssoStartURL, ssoRegion, ssoSession); loginErr != nil {
 				return fmt.Errorf("SSO login failed: %w", loginErr)
 			}
 			token, err = sso.GetTokenForStartURL(ssoStartURL)
