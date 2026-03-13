@@ -757,12 +757,13 @@ const exitCodeInvalidSession = 3
 func handleStatus(ctx context.Context, c *cli.Command) error {
 	opts := getGlobalOptions(c)
 
+	// Resolve profile: --profile → positional arg → AWS_PROFILE → config fallback
 	profileName := c.String("profile")
+	if profileName == "" && c.Args().Len() > 0 {
+		profileName = c.Args().First()
+	}
 	if profileName == "" {
 		profileName = os.Getenv("AWS_PROFILE")
-		if profileName == "" {
-			return fmt.Errorf("no profile specified. Use --profile or set AWS_PROFILE environment variable")
-		}
 	}
 
 	cfg, err := config.Load()
@@ -770,9 +771,30 @@ func handleStatus(ctx context.Context, c *cli.Command) error {
 		return fmt.Errorf("failed to load AWS config: %w", err)
 	}
 
-	profile := cfg.GetProfile(profileName)
-	if profile == nil {
-		return fmt.Errorf("profile %q not found in ~/.aws/config", profileName)
+	var profile *config.Profile
+	if profileName != "" {
+		profile = cfg.GetProfile(profileName)
+		if profile == nil {
+			return fmt.Errorf("profile %q not found in ~/.aws/config", profileName)
+		}
+	} else {
+		ssoProfiles := cfg.GetSSOProfiles()
+		switch len(ssoProfiles) {
+		case 0:
+			return fmt.Errorf("no SSO profiles found. Use --profile or set AWS_PROFILE")
+		case 1:
+			profile = ssoProfiles[0]
+			profileName = profile.Name
+		default:
+			if opts.JSON {
+				return fmt.Errorf("--profile is required when using --json with multiple profiles")
+			}
+			profile, err = selectProfileInteractive(ssoProfiles)
+			if err != nil {
+				return err
+			}
+			profileName = profile.Name
+		}
 	}
 
 	if !profile.IsSSO {
