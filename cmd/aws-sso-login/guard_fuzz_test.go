@@ -85,6 +85,39 @@ func FuzzExtractAWSProfile(f *testing.F) {
 	})
 }
 
+// FuzzAnalyzeCommand verifies that AnalyzeCommand never panics on arbitrary input
+// and checks semantic invariants about the Verdict.
+func FuzzAnalyzeCommand(f *testing.F) {
+	seeds := []string{
+		"aws s3 ls --profile prod",
+		"aws s3 ls --profile prod-ro",
+		"export AWS_PROFILE=prod; aws s3 ls",
+		"AWS_PROFILE=prod aws s3 ls",
+		"env AWS_PROFILE=prod aws s3 ls",
+		"bash -c 'aws s3 ls --profile prod'",
+		"env AWS_PROFILE=prod-ro sudo -u ec2-user command aws s3 ls",
+		`export AWS_PROFILE=prod; (AWS_PROFILE=; aws s3 ls)`,
+		`bash -lc 'env -u AWS_PROFILE aws s3 ls --profile prod'`,
+		"", "echo hello", "terraform apply",
+	}
+	for _, s := range seeds {
+		f.Add(s)
+	}
+
+	f.Fuzz(func(t *testing.T, cmd string) {
+		got := AnalyzeCommand(cmd)
+
+		// Invariant: if quickHit returns false, result must be VerdictAllow.
+		if !quickHit(cmd) && got.Verdict != VerdictAllow {
+			t.Errorf("quickHit miss but non-Allow result for %q: %v", cmd, got.Verdict)
+		}
+		// Invariant: VerdictBlock requires a non-empty reason.
+		if got.Verdict == VerdictBlock && got.Reason == "" {
+			t.Errorf("VerdictBlock with empty Reason for %q", cmd)
+		}
+	})
+}
+
 // FuzzRunGuard verifies that runGuard never panics and respects the invariant:
 // when readOnly=false, the result must never be blocked=true.
 func FuzzRunGuard(f *testing.F) {
