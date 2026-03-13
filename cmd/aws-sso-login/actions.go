@@ -2,8 +2,12 @@ package main
 
 import (
 	"context"
+	"encoding/json"
+	"errors"
 	"fmt"
+	"io"
 	"os"
+	"regexp"
 	"strings"
 
 	"github.com/Photosynth-inc/aws-sso-login/internal/config"
@@ -541,6 +545,189 @@ func handleList(ctx context.Context, c *cli.Command) error {
 		}
 	}
 	return nil
+}
+
+// --- guard ---
+
+// guardHookPayload is the common envelope sent via stdin by Claude Code, Cursor, and Codex hooks.
+type guardHookPayload struct {
+	HookEventName string `json:"hook_event_name"`
+
+	// PreToolUse fields (Claude Code / Cursor)
+	ToolName  string `json:"tool_name"`
+	ToolInput struct {
+		Command string `json:"command"`
+	} `json:"tool_input"`
+}
+
+// exitCodePolicyViolation is returned when guard blocks an action.
+// Claude Code and Cursor both treat exit 2 as a hard block.
+// Codex will support the same convention once PreToolUse lands (openai/codex#13498).
+const exitCodePolicyViolation = 2
+
+// reProfile matches --profile=value or --profile value, with optional quoting.
+// Capturing groups: 1=double-quoted, 2=single-quoted, 3=unquoted.
+var reProfile = regexp.MustCompile(`--profile(?:=|\s+)(?:"([^"]+)"|'([^']+)'|(\S+))`)
+
+// reAWSProfileEnv matches an inline AWS_PROFILE=value assignment in a shell command.
+// Capturing groups: 1=double-quoted, 2=single-quoted, 3=unquoted.
+var reAWSProfileEnv = regexp.MustCompile(`(?:^|\s)AWS_PROFILE=(?:"([^"]+)"|'([^']+)'|(\S+))`)
+
+// reFirstCommand matches the first real command after any leading KEY=value env var assignments.
+// It handles quoted values (including spaces) and case-insensitive key names.
+// Capture group 1 is the command token itself.
+var reFirstCommand = regexp.MustCompile(
+	`^(?:[A-Za-z_][A-Za-z0-9_]*=(?:"[^"]*"|'[^']*'|\S*)\s+)*(\S+)`,
+)
+
+// isAWSCLICommand returns true if the shell command invokes the AWS CLI.
+// It skips leading KEY=VALUE environment variable assignments to find the actual command.
+func isAWSCLICommand(command string) bool {
+	m := reFirstCommand.FindStringSubmatch(strings.TrimSpace(command))
+	if len(m) < 2 {
+		return false
+	}
+	cmd := m[1]
+	return cmd == "aws" || strings.HasSuffix(cmd, "/aws")
+}
+
+// extractLastProfile returns the last --profile value in a shell command string.
+// It handles both --profile=value and --profile value forms, and strips surrounding quotes.
+// Returns ("", false) when no --profile flag is present.
+func extractLastProfile(command string) (string, bool) {
+	matches := reProfile.FindAllStringSubmatch(command, -1)
+	if len(matches) == 0 {
+		return "", false
+	}
+	last := matches[len(matches)-1]
+	switch {
+	case last[1] != "":
+		return last[1], true // double-quoted
+	case last[2] != "":
+		return last[2], true // single-quoted
+	default:
+		return last[3], true // unquoted
+	}
+}
+
+// extractAWSProfile returns the effective AWS profile for a command.
+// --profile flag takes precedence over AWS_PROFILE= inline assignment,
+// matching actual AWS CLI precedence rules.
+// Returns ("", false) when no profile is specified by either method.
+func extractAWSProfile(command string) (string, bool) {
+	if profile, ok := extractLastProfile(command); ok {
+		return profile, true
+	}
+	matches := reAWSProfileEnv.FindAllStringSubmatch(command, -1)
+	if len(matches) == 0 {
+		return "", false
+	}
+	last := matches[len(matches)-1]
+	switch {
+	case last[1] != "":
+		return last[1], true // double-quoted
+	case last[2] != "":
+		return last[2], true // single-quoted
+	default:
+		return last[3], true // unquoted
+	}
+}
+
+// analyzeGuard parses the hook payload from r and analyses the command string
+// using the shell AST. It returns the Finding and the profile name (if known).
+func analyzeGuard(readOnly, failOpen bool, r io.Reader) (Finding, string) {
+	var payload guardHookPayload
+	if err := json.NewDecoder(r).Decode(&payload); err != nil {
+		if errors.Is(err, io.EOF) {
+			return Finding{Verdict: VerdictAllow}, "" // empty stdin — not a hook invocation
+		}
+		// Malformed JSON: fail-closed when --readonly-only, unless --fail-open.
+		if readOnly && !failOpen {
+			return Finding{Verdict: VerdictBlock, Reason: "malformed hook payload (fail-closed)"}, ""
+		}
+		return Finding{Verdict: VerdictAllow}, ""
+	}
+
+	switch payload.HookEventName {
+	case "PreToolUse", "preToolUse":
+		// Claude Code / Cursor (and Codex once openai/codex#13498 lands).
+	default:
+		return Finding{Verdict: VerdictAllow}, ""
+	}
+
+	if !readOnly {
+		return Finding{Verdict: VerdictAllow}, ""
+	}
+
+	f := AnalyzeCommand(payload.ToolInput.Command)
+
+	// Treat Unknown as Block when fail-closed.
+	if f.Verdict == VerdictUnknown && !failOpen {
+		return Finding{Verdict: VerdictBlock, Reason: f.Reason}, ""
+	}
+	return f, f.Profile
+}
+
+// runGuard is the testable core of handleGuard.
+// Returns (blocked, profileName): blocked=true means the action must be denied.
+// profileName is set when a specific non-readonly profile triggered the block.
+func runGuard(readOnly, failOpen bool, r io.Reader) (bool, string) {
+	f, profile := analyzeGuard(readOnly, failOpen, r)
+	return f.Verdict == VerdictBlock, profile
+}
+
+// guardAskResponse is the JSON written to stdout when --on-violation=ask is set.
+// Claude Code reads this and shows a confirmation dialog to the user.
+type guardAskResponse struct {
+	HookSpecificOutput guardAskOutput `json:"hookSpecificOutput"`
+}
+
+type guardAskOutput struct {
+	HookEventName            string `json:"hookEventName"`
+	PermissionDecision       string `json:"permissionDecision"`
+	PermissionDecisionReason string `json:"permissionDecisionReason"`
+}
+
+func handleGuard(_ context.Context, c *cli.Command) error {
+	// If stdin is a terminal (manual invocation, not a hook), skip all checks.
+	if fi, err := os.Stdin.Stat(); err == nil && fi.Mode()&os.ModeCharDevice != 0 {
+		return nil
+	}
+
+	f, profile := analyzeGuard(c.Bool("readonly-only"), c.Bool("fail-open"), os.Stdin)
+	if f.Verdict != VerdictBlock {
+		return nil
+	}
+
+	onViolation := c.String("on-violation")
+
+	if onViolation == "ask" {
+		reason := "Non-read-only AWS profile detected"
+		if profile != "" {
+			reason = fmt.Sprintf("Profile %q is not read-only (must end with -ro)", profile)
+		} else if f.Reason != "" {
+			reason = f.Reason
+		}
+		resp := guardAskResponse{
+			HookSpecificOutput: guardAskOutput{
+				HookEventName:            "PreToolUse",
+				PermissionDecision:       "ask",
+				PermissionDecisionReason: reason,
+			},
+		}
+		if err := json.NewEncoder(os.Stdout).Encode(resp); err != nil {
+			return fmt.Errorf("failed to write ask response: %w", err)
+		}
+		return nil
+	}
+
+	// Default: hard block (exit 2).
+	if profile != "" {
+		fmt.Fprintf(os.Stderr, "BLOCKED: profile %q is not allowed. Only read-only profiles (ending with -ro) are permitted.\n", profile)
+	} else {
+		fmt.Fprintf(os.Stderr, "BLOCKED: %s. Use --fail-open to allow on parse errors.\n", f.Reason)
+	}
+	return &ExitError{Code: exitCodePolicyViolation, Err: fmt.Errorf("policy violation"), Silent: true}
 }
 
 // --- status ---
