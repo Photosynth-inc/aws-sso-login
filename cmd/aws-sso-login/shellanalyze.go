@@ -185,7 +185,9 @@ func inspectCall(call *syntax.CallExpr, ambient string, depth int) Finding {
 		if shellHasCFlag(remainingArgs) {
 			return Finding{Verdict: VerdictUnknown, Reason: "dynamic shell -c argument"}
 		}
-		return Finding{Verdict: VerdictAllow}
+		// Shell without -c: reads from stdin, pipe, or a script file whose
+		// contents cannot be statically analysed.
+		return Finding{Verdict: VerdictUnknown, Reason: "shell without static -c argument"}
 	}
 
 	if !isAWSBinary(cmd) {
@@ -215,8 +217,24 @@ func resolveWrappers(cmd string, args []*syntax.Word) (realCmd string, realArgs 
 	for {
 		base := lastPathComponent(cmd)
 		switch base {
-		case "command", "time":
+		case "command":
 			rest := skipBoolFlags(args[1:])
+			if len(rest) == 0 {
+				return "", nil, envProfile, envProfileSet
+			}
+			next, ok := wordStatic(rest[0])
+			if !ok {
+				return "", nil, envProfile, envProfileSet
+			}
+			cmd = next
+			args = rest
+
+		case "time":
+			// GNU time: -f/--format and -o/--output take values; others are bool.
+			rest := skipMixedFlags(args[1:], map[string]bool{
+				"-f": true, "--format": true,
+				"-o": true, "--output": true,
+			})
 			if len(rest) == 0 {
 				return "", nil, envProfile, envProfileSet
 			}

@@ -76,8 +76,11 @@ func TestAnalyzeCommand(t *testing.T) {
 		// wordHasPrefix: quoted --profile=$P
 		{`aws s3 ls "--profile=$P"`, VerdictUnknown},
 
-		// shellHasCFlag: --rcfile contains 'c' but is not a -c flag
-		{"bash --rcfile ~/.bashrc", VerdictAllow},
+		// bash without -c: reads from stdin/pipe/script — cannot analyze statically
+		{"bash script.sh", VerdictUnknown},
+		{"cat script.sh | bash", VerdictUnknown},
+		// bash --rcfile has no -c arg either → Unknown (may read AWS commands from stdin)
+		{"bash --rcfile ~/.bashrc", VerdictUnknown},
 
 		// env empty AWS_PROFILE resets ambient — should not block
 		{"export AWS_PROFILE=staging; env AWS_PROFILE= aws s3 ls", VerdictAllow},
@@ -94,6 +97,31 @@ func TestAnalyzeCommand(t *testing.T) {
 
 		// Round-2: DblQuoted dynamic prefix detection (Medium fix)
 		{`aws s3 ls "--pro${X}file=$P"`, VerdictUnknown},
+
+		// profile ordering: global flag before subcommand
+		{"aws --profile prod s3 ls", VerdictBlock},
+		{"aws --profile prod-ro s3 ls", VerdictAllow},
+
+		// multiple --profile: last occurrence wins (AWS CLI behaviour)
+		{"aws s3 ls --profile prod --profile prod-ro", VerdictAllow},
+		{"aws s3 ls --profile prod-ro --profile prod", VerdictBlock},
+		{"aws s3 ls --profile=$P --profile prod-ro", VerdictAllow},   // static last wins
+		{"aws s3 ls --profile prod-ro --profile=$P", VerdictUnknown}, // dynamic last → unknown
+
+		// flag overrides AWS_PROFILE env
+		{"AWS_PROFILE=prod aws s3 ls --profile prod-ro", VerdictAllow},
+		{"AWS_PROFILE=prod-ro aws s3 ls --profile prod", VerdictBlock},
+
+		// pipeline
+		{"aws sts get-caller-identity --profile prod | jq -r .Arn", VerdictBlock},
+		{"aws s3 ls --profile prod-ro | aws sts get-caller-identity --profile prod", VerdictBlock},
+
+		// comment line
+		{"# aws s3 ls --profile prod", VerdictAllow},
+
+		// command substitution: aws inside $() is analyzed
+		{"echo $(aws s3 ls --profile prod)", VerdictBlock},
+		{"echo $(aws s3 ls --profile prod-ro)", VerdictAllow},
 	}
 
 	for _, tt := range tests {
@@ -140,6 +168,40 @@ func TestGuardAskJSON(t *testing.T) {
 	}
 	if reason, _ := hso["permissionDecisionReason"].(string); reason == "" {
 		t.Error("permissionDecisionReason is empty")
+	}
+}
+
+// BenchmarkAnalyzeCommand measures the latency of shell analysis.
+// As a PreToolUse hook, analysis must complete well within typical hook timeouts
+// (Claude Code default is ~10 s). Run with: go test -bench=. -benchtime=5s
+func BenchmarkAnalyzeCommand(b *testing.B) {
+	cases := []string{
+		// simple allow (quickHit shortcut)
+		"echo hello",
+		// single aws call
+		"aws s3 ls --profile prod",
+		"aws s3 ls --profile prod-ro",
+		// chained commands
+		"export AWS_PROFILE=prod; aws s3 ls; aws sts get-caller-identity",
+		// nested shell
+		"bash -c 'aws s3 ls --profile prod'",
+		// complex wrappers
+		"env -i AWS_PROFILE=prod sudo -u ec2-user command aws s3 ls",
+	}
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		AnalyzeCommand(cases[i%len(cases)])
+	}
+}
+
+// BenchmarkAnalyzeCommand_Worst measures a pathological case that exercises
+// depth/size limits to confirm the guard never blocks the hook for too long.
+func BenchmarkAnalyzeCommand_Worst(b *testing.B) {
+	// Nested shells at max depth
+	worst := "bash -c 'bash -c \"bash -c \\\"aws s3 ls --profile prod\\\"\"'"
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		AnalyzeCommand(worst)
 	}
 }
 
