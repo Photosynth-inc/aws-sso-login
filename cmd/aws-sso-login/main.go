@@ -161,9 +161,10 @@ func main() {
 				},
 			},
 			{
-				Name:   "status",
-				Usage:  "Show session status",
-				Action: handleStatus,
+				Name:      "status",
+				Usage:     "Show session status",
+				ArgsUsage: "[profile]",
+				Action:    handleStatus,
 			},
 			{
 				Name:   "guard",
