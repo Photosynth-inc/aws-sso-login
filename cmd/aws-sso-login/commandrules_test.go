@@ -151,6 +151,23 @@ func TestClassifyCommandsWithWrappers(t *testing.T) {
 		{"bash -c 'terraform apply'", VerdictBlock},
 		{"sh -c 'sam deploy'", VerdictBlock},
 		{"bash -c 'terraform plan'", VerdictAllow},
+
+		// package runners
+		{"npx cdk deploy", VerdictBlock},
+		{"npx cdk diff", VerdictAllow},
+		{"npx serverless deploy", VerdictBlock},
+		{"npx --yes cdk deploy", VerdictBlock},
+		{"bunx cdk destroy", VerdictBlock},
+		{"yarn cdk deploy", VerdictBlock},
+		{"yarn terraform plan", VerdictAllow},
+		{"pnpm exec cdk deploy", VerdictBlock},
+		{"pnpm dlx serverless deploy", VerdictBlock},
+		{"pnpm cdk diff", VerdictAllow},
+
+		// package runners + other wrappers
+		{"sudo npx cdk deploy", VerdictBlock},
+		{"env npx terraform apply", VerdictBlock},
+		{"bash -c 'npx cdk deploy'", VerdictBlock},
 	}
 
 	for _, tt := range tests {

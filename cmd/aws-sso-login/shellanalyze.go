@@ -69,6 +69,12 @@ func quickHit(cmd string) bool {
 			return true
 		}
 	}
+	// Package runners that may wrap first-class commands.
+	for _, runner := range []string{"npx", "bunx", "yarn", "pnpm"} {
+		if strings.Contains(cmd, runner) {
+			return true
+		}
+	}
 	return false
 }
 
@@ -271,6 +277,55 @@ func resolveWrappers(cmd string, args []*syntax.Word) (realCmd string, realArgs 
 			next, ok := wordStatic(rest[0])
 			if !ok {
 				return "", nil, envProfile, envProfileSet
+			}
+			cmd = next
+			args = rest
+
+		case "npx", "bunx":
+			// npx/bunx [flags] <package> [args...] — strip flags then unwrap.
+			rest := skipBoolFlags(args[1:])
+			if len(rest) == 0 {
+				return "", nil, envProfile, envProfileSet
+			}
+			next, ok := wordStatic(rest[0])
+			if !ok {
+				return "", nil, envProfile, envProfileSet
+			}
+			cmd = next
+			args = rest
+
+		case "yarn":
+			// yarn [global-flags] <command> [args...] — strip flags then unwrap.
+			rest := skipBoolFlags(args[1:])
+			if len(rest) == 0 {
+				return "", nil, envProfile, envProfileSet
+			}
+			next, ok := wordStatic(rest[0])
+			if !ok {
+				return "", nil, envProfile, envProfileSet
+			}
+			cmd = next
+			args = rest
+
+		case "pnpm":
+			// pnpm exec <command> [args...] or pnpm <command> [args...]
+			rest := skipBoolFlags(args[1:])
+			if len(rest) == 0 {
+				return "", nil, envProfile, envProfileSet
+			}
+			next, ok := wordStatic(rest[0])
+			if !ok {
+				return "", nil, envProfile, envProfileSet
+			}
+			if next == "exec" || next == "dlx" {
+				rest = rest[1:]
+				if len(rest) == 0 {
+					return "", nil, envProfile, envProfileSet
+				}
+				next, ok = wordStatic(rest[0])
+				if !ok {
+					return "", nil, envProfile, envProfileSet
+				}
 			}
 			cmd = next
 			args = rest
