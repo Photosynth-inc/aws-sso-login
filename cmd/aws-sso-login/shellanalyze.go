@@ -17,9 +17,11 @@ const (
 
 // Finding is the result of analysing a shell command string.
 type Finding struct {
-	Verdict Verdict
-	Reason  string
-	Profile string // non-empty when Verdict==VerdictBlock and a profile name was found
+	Verdict     Verdict
+	Reason      string
+	Profile     string // non-empty when Verdict==VerdictBlock and a profile name was found
+	CommandRisk Risk   // set when --classify-commands detects a risky operation
+	Command     string // the command that triggered the risk (e.g. "terraform")
 }
 
 const (
@@ -31,19 +33,22 @@ const (
 // describes whether a non-read-only AWS profile is used anywhere in the command,
 // including in chained commands (;, &&, ||), pipelines, nested shells (bash -c),
 // and wrapper commands (env, sudo, command).
-func AnalyzeCommand(src string) Finding {
-	if !quickHit(src) {
+// classifyCommands enables risk classification for first-class AWS ecosystem tools.
+func AnalyzeCommand(src string, classifyCommands ...bool) Finding {
+	classify := len(classifyCommands) > 0 && classifyCommands[0]
+	if !quickHit(src, classify) {
 		return Finding{Verdict: VerdictAllow}
 	}
-	return analyzeRecursive(src, 0, "")
+	return analyzeRecursive(src, 0, "", classify)
 }
 
 // quickHit is a fast pre-filter: if none of these keywords appear there is
 // nothing for the guard to check. Shell interpreters are included because
 // `bash -c $DYNAMIC` can hide AWS invocations. Full-path forms (/bin/sh,
 // /usr/bin/bash, etc.) are covered by the "/sh" and "/bash" checks.
-func quickHit(cmd string) bool {
-	return strings.Contains(cmd, "aws") ||
+// When classify is true, first-class command names are also checked.
+func quickHit(cmd string, classify bool) bool {
+	if strings.Contains(cmd, "aws") ||
 		strings.Contains(cmd, "AWS_PROFILE") ||
 		strings.Contains(cmd, "--profile") ||
 		strings.Contains(cmd, "bash") ||
@@ -56,7 +61,17 @@ func quickHit(cmd string) bool {
 		strings.Contains(cmd, " sh ") ||
 		strings.Contains(cmd, "\tsh ") ||
 		strings.Contains(cmd, " sh\t") ||
-		strings.Contains(cmd, "\tsh\t")
+		strings.Contains(cmd, "\tsh\t") {
+		return true
+	}
+	if classify {
+		for _, name := range firstClassCommandNames() {
+			if strings.Contains(cmd, name) {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // worsen returns whichever Finding has the higher (more severe) Verdict.
@@ -67,7 +82,7 @@ func worsen(a, b Finding) Finding {
 	return a
 }
 
-func analyzeRecursive(src string, depth int, inheritedAmbient string) Finding {
+func analyzeRecursive(src string, depth int, inheritedAmbient string, classify bool) Finding {
 	if depth > maxAnalyzeDepth || len(src) > maxCommandLen {
 		return Finding{Verdict: VerdictUnknown, Reason: "depth/size limit exceeded"}
 	}
@@ -78,13 +93,13 @@ func analyzeRecursive(src string, depth int, inheritedAmbient string) Finding {
 		return Finding{Verdict: VerdictUnknown, Reason: "shell parse error"}
 	}
 
-	return walkStmts(f.Stmts, inheritedAmbient, depth)
+	return walkStmts(f.Stmts, inheritedAmbient, depth, classify)
 }
 
 // walkStmts processes a list of statements in document order, tracking
 // AWS_PROFILE assignments as ambient context. Subshells are analysed in an
 // isolated scope so their assignments do not propagate to the outer ambient.
-func walkStmts(stmts []*syntax.Stmt, inheritedAmbient string, depth int) Finding {
+func walkStmts(stmts []*syntax.Stmt, inheritedAmbient string, depth int, classify bool) Finding {
 	if depth > maxAnalyzeDepth {
 		return Finding{Verdict: VerdictUnknown, Reason: "depth/size limit exceeded"}
 	}
@@ -97,7 +112,7 @@ func walkStmts(stmts []*syntax.Stmt, inheritedAmbient string, depth int) Finding
 			switch node := n.(type) {
 			case *syntax.Subshell:
 				// Isolated scope: export/declare inside must not leak to outer ambient.
-				out = worsen(out, walkStmts(node.Stmts, ambient, depth+1))
+				out = worsen(out, walkStmts(node.Stmts, ambient, depth+1, classify))
 				return false // prevent outer walk from descending into subshell
 
 			case *syntax.DeclClause:
@@ -129,7 +144,7 @@ func walkStmts(stmts []*syntax.Stmt, inheritedAmbient string, depth int) Finding
 					}
 					return true
 				}
-				out = worsen(out, inspectCall(node, ambient, depth))
+				out = worsen(out, inspectCall(node, ambient, depth, classify))
 			}
 			return true
 		})
@@ -137,9 +152,10 @@ func walkStmts(stmts []*syntax.Stmt, inheritedAmbient string, depth int) Finding
 	return out
 }
 
-// inspectCall examines a single CallExpr for AWS profile policy violations.
+// inspectCall examines a single CallExpr for AWS profile policy violations
+// and (when classify is true) command-risk classification for first-class tools.
 // It unwraps transparent wrappers (env, command, sudo, time) before checking.
-func inspectCall(call *syntax.CallExpr, ambient string, depth int) Finding {
+func inspectCall(call *syntax.CallExpr, ambient string, depth int, classify bool) Finding {
 	if len(call.Args) == 0 {
 		return Finding{Verdict: VerdictAllow}
 	}
@@ -179,7 +195,7 @@ func inspectCall(call *syntax.CallExpr, ambient string, depth int) Finding {
 				}
 				shellAmbient = val
 			}
-			return analyzeRecursive(inner, depth+1, shellAmbient)
+			return analyzeRecursive(inner, depth+1, shellAmbient, classify)
 		}
 		// -c flag present but argument is dynamic.
 		if shellHasCFlag(remainingArgs) {
@@ -190,21 +206,56 @@ func inspectCall(call *syntax.CallExpr, ambient string, depth int) Finding {
 		return Finding{Verdict: VerdictUnknown, Reason: "shell without static -c argument"}
 	}
 
-	if !isAWSBinary(cmd) {
-		return Finding{Verdict: VerdictAllow}
+	// AWS CLI profile check (always active when --readonly-only)
+	if isAWSBinary(cmd) {
+		fakeCall := &syntax.CallExpr{Args: remainingArgs, Assigns: call.Assigns}
+		prof, state := effectiveProfileFromCall(fakeCall, effectiveAmbient)
+		switch state {
+		case "known":
+			if !strings.HasSuffix(prof, "-ro") {
+				return Finding{Verdict: VerdictBlock, Reason: "non-read-only profile detected", Profile: prof}
+			}
+		case "unknown":
+			return Finding{Verdict: VerdictUnknown, Reason: "profile value is dynamic"}
+		}
 	}
 
-	fakeCall := &syntax.CallExpr{Args: remainingArgs, Assigns: call.Assigns}
-	prof, state := effectiveProfileFromCall(fakeCall, effectiveAmbient)
-	switch state {
-	case "known":
-		if !strings.HasSuffix(prof, "-ro") {
-			return Finding{Verdict: VerdictBlock, Reason: "non-read-only profile detected", Profile: prof}
+	// Command-risk classification for first-class AWS ecosystem tools
+	if classify {
+		base := lastPathComponent(cmd)
+		if rule := lookupCommandRule(base); rule != nil {
+			// Extract static args for classification
+			var argStrings []string
+			for _, arg := range remainingArgs {
+				s, ok := wordStatic(arg)
+				if !ok {
+					return Finding{
+						Verdict:     VerdictUnknown,
+						Reason:      "dynamic arguments for " + base,
+						Command:     base,
+						CommandRisk: RiskUnknown,
+					}
+				}
+				argStrings = append(argStrings, s)
+			}
+			risk, reason := rule.Classify(argStrings)
+			return findingFromRisk(risk, reason, base)
 		}
-	case "unknown":
-		return Finding{Verdict: VerdictUnknown, Reason: "profile value is dynamic"}
 	}
+
 	return Finding{Verdict: VerdictAllow}
+}
+
+// findingFromRisk converts a Risk classification into a Finding.
+func findingFromRisk(risk Risk, reason, cmd string) Finding {
+	switch risk {
+	case RiskRead:
+		return Finding{Verdict: VerdictAllow, Reason: reason, Command: cmd, CommandRisk: risk}
+	case RiskMutate, RiskDestructive, RiskExec:
+		return Finding{Verdict: VerdictBlock, Reason: reason, Command: cmd, CommandRisk: risk}
+	default: // RiskUnknown
+		return Finding{Verdict: VerdictUnknown, Reason: reason, Command: cmd, CommandRisk: risk}
+	}
 }
 
 // resolveWrappers iteratively strips transparent command wrappers
