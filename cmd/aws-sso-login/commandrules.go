@@ -70,11 +70,6 @@ func lookupCommandRule(cmd string) *CommandRule {
 	return commandRuleMap[base]
 }
 
-// isFirstClassCommand returns true if the command is recognized by the rule table.
-func isFirstClassCommand(cmd string) bool {
-	return lookupCommandRule(cmd) != nil
-}
-
 // firstClassCommandNames returns all registered command names for quickHit.
 func firstClassCommandNames() []string {
 	names := make([]string, 0, len(commandRuleMap))
@@ -88,16 +83,6 @@ func firstClassCommandNames() []string {
 func hasFlag(args []string, flag string) bool {
 	for _, a := range args {
 		if a == flag {
-			return true
-		}
-	}
-	return false
-}
-
-// hasFlagPrefix checks if any element in args starts with the given prefix.
-func hasFlagPrefix(args []string, prefix string) bool {
-	for _, a := range args {
-		if strings.HasPrefix(a, prefix) {
 			return true
 		}
 	}

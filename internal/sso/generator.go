@@ -262,21 +262,21 @@ func FormatAsINI(profiles []ProfileTemplate) string {
 	sb.WriteString("# " + fmt.Sprintf("%d profiles\n\n", len(profiles)))
 
 	for _, p := range profiles {
-		sb.WriteString(fmt.Sprintf("[profile %s]\n", p.Name))
-		sb.WriteString(fmt.Sprintf("sso_session = %s\n", p.SSOSession))
-		sb.WriteString(fmt.Sprintf("sso_account_id = %s\n", p.AccountID))
-		sb.WriteString(fmt.Sprintf("sso_role_name = %s\n", p.RoleName))
-		sb.WriteString(fmt.Sprintf("region = %s\n", p.Region))
-		sb.WriteString(fmt.Sprintf("output = %s\n", p.Output))
+		fmt.Fprintf(&sb, "[profile %s]\n", p.Name)
+		fmt.Fprintf(&sb, "sso_session = %s\n", p.SSOSession)
+		fmt.Fprintf(&sb, "sso_account_id = %s\n", p.AccountID)
+		fmt.Fprintf(&sb, "sso_role_name = %s\n", p.RoleName)
+		fmt.Fprintf(&sb, "region = %s\n", p.Region)
+		fmt.Fprintf(&sb, "output = %s\n", p.Output)
 		sb.WriteString("\n")
 	}
 
 	// Add SSO session configuration
 	if len(profiles) > 0 {
 		p := profiles[0]
-		sb.WriteString(fmt.Sprintf("[sso-session %s]\n", p.SSOSession))
-		sb.WriteString(fmt.Sprintf("sso_start_url = %s\n", p.SSOStartURL))
-		sb.WriteString(fmt.Sprintf("sso_region = %s\n", p.SSORegion))
+		fmt.Fprintf(&sb, "[sso-session %s]\n", p.SSOSession)
+		fmt.Fprintf(&sb, "sso_start_url = %s\n", p.SSOStartURL)
+		fmt.Fprintf(&sb, "sso_region = %s\n", p.SSORegion)
 		sb.WriteString("sso_registration_scopes = sso:account:access\n")
 	}
 
