@@ -670,16 +670,22 @@ func extractAWSProfile(command string) (string, bool) {
 	}
 }
 
+// guardOptions holds the parsed flags for the guard command.
+type guardOptions struct {
+	readOnly bool
+	failOpen bool
+}
+
 // analyzeGuard parses the hook payload from r and analyses the command string
 // using the shell AST. It returns the Finding and the profile name (if known).
-func analyzeGuard(readOnly, failOpen bool, r io.Reader) (Finding, string) {
+func analyzeGuard(opts guardOptions, r io.Reader) (Finding, string) {
 	var payload guardHookPayload
 	if err := json.NewDecoder(r).Decode(&payload); err != nil {
 		if errors.Is(err, io.EOF) {
 			return Finding{Verdict: VerdictAllow}, "" // empty stdin — not a hook invocation
 		}
 		// Malformed JSON: fail-closed when --readonly-only, unless --fail-open.
-		if readOnly && !failOpen {
+		if opts.readOnly && !opts.failOpen {
 			return Finding{Verdict: VerdictBlock, Reason: "malformed hook payload (fail-closed)"}, ""
 		}
 		return Finding{Verdict: VerdictAllow}, ""
@@ -692,24 +698,30 @@ func analyzeGuard(readOnly, failOpen bool, r io.Reader) (Finding, string) {
 		return Finding{Verdict: VerdictAllow}, ""
 	}
 
-	if !readOnly {
+	if !opts.readOnly {
 		return Finding{Verdict: VerdictAllow}, ""
 	}
 
 	f := AnalyzeCommand(payload.ToolInput.Command)
 
 	// Treat Unknown as Block when fail-closed.
-	if f.Verdict == VerdictUnknown && !failOpen {
-		return Finding{Verdict: VerdictBlock, Reason: f.Reason}, ""
+	if f.Verdict == VerdictUnknown && !opts.failOpen {
+		return Finding{Verdict: VerdictBlock, Reason: f.Reason, Command: f.Command, CommandRisk: f.CommandRisk}, ""
 	}
 	return f, f.Profile
 }
 
 // runGuard is the testable core of handleGuard.
-// Returns (blocked, profileName): blocked=true means the action must be denied.
-// profileName is set when a specific non-readonly profile triggered the block.
-func runGuard(readOnly, failOpen bool, r io.Reader) (bool, string) {
-	f, profile := analyzeGuard(readOnly, failOpen, r)
+// Returns (blocked, finding): blocked=true means the action must be denied.
+func runGuard(opts guardOptions, r io.Reader) (bool, Finding) {
+	f, _ := analyzeGuard(opts, r)
+	return f.Verdict == VerdictBlock, f
+}
+
+// runGuardCompat is a backwards-compatible wrapper used by existing tests.
+func runGuardCompat(readOnly, failOpen bool, r io.Reader) (bool, string) {
+	opts := guardOptions{readOnly: readOnly, failOpen: failOpen}
+	f, profile := analyzeGuard(opts, r)
 	return f.Verdict == VerdictBlock, profile
 }
 
@@ -731,7 +743,11 @@ func handleGuard(_ context.Context, c *cli.Command) error {
 		return nil
 	}
 
-	f, profile := analyzeGuard(c.Bool("readonly-only"), c.Bool("fail-open"), os.Stdin)
+	opts := guardOptions{
+		readOnly: c.Bool("readonly-only"),
+		failOpen: c.Bool("fail-open"),
+	}
+	f, profile := analyzeGuard(opts, os.Stdin)
 	if f.Verdict != VerdictBlock {
 		return nil
 	}
@@ -739,12 +755,7 @@ func handleGuard(_ context.Context, c *cli.Command) error {
 	onViolation := c.String("on-violation")
 
 	if onViolation == "ask" {
-		reason := "Non-read-only AWS profile detected"
-		if profile != "" {
-			reason = fmt.Sprintf("Profile %q is not read-only (must end with -ro)", profile)
-		} else if f.Reason != "" {
-			reason = f.Reason
-		}
+		reason := guardBlockReason(f, profile)
 		resp := guardAskResponse{
 			HookSpecificOutput: guardAskOutput{
 				HookEventName:            "PreToolUse",
@@ -759,12 +770,25 @@ func handleGuard(_ context.Context, c *cli.Command) error {
 	}
 
 	// Default: hard block (exit 2).
-	if profile != "" {
-		fmt.Fprintf(os.Stderr, "BLOCKED: profile %q is not allowed. Only read-only profiles (ending with -ro) are permitted.\n", profile)
-	} else {
-		fmt.Fprintf(os.Stderr, "BLOCKED: %s. Use --fail-open to allow on parse errors.\n", f.Reason)
-	}
+	reason := guardBlockReason(f, profile)
+	fmt.Fprintf(os.Stderr, "BLOCKED: %s\n", reason)
 	return &ExitError{Code: exitCodePolicyViolation, Err: fmt.Errorf("policy violation"), Silent: true}
+}
+
+// guardBlockReason generates a human-readable block reason from a Finding.
+func guardBlockReason(f Finding, profile string) string {
+	// AWS profile violation
+	if profile != "" {
+		return fmt.Sprintf("Profile %q is not read-only (must end with -ro)", profile)
+	}
+	// Command-risk classification violation
+	if f.Command != "" && f.CommandRisk > RiskRead {
+		return fmt.Sprintf("%s: %s (risk: %s)", f.Command, f.Reason, f.CommandRisk)
+	}
+	if f.Reason != "" {
+		return f.Reason
+	}
+	return "policy violation"
 }
 
 // --- status ---

@@ -137,7 +137,7 @@ func TestRunGuardReadonlyOnly(t *testing.T) {
 		{"--profile wins over AWS_PROFILE", makePayload(`AWS_PROFILE=admin aws s3 ls --profile prod-ro`), true, false, false},
 
 		// non-AWS CLI command with --profile → not blocked
-		{"terraform not blocked", makePayload(`terraform apply --profile prod`), true, false, false},
+		{"terraform apply blocked", makePayload(`terraform apply --profile prod`), true, false, true},
 
 		// --readonly-only not set → always allowed
 		{"no flag non-ro", makePayload(`aws s3 ls --profile prod`), false, false, false},
@@ -167,9 +167,9 @@ func TestRunGuardReadonlyOnly(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			r := strings.NewReader(tt.stdin)
-			blocked, _ := runGuard(tt.readOnly, tt.failOpen, r)
+			blocked, _ := runGuardCompat(tt.readOnly, tt.failOpen, r)
 			if blocked != tt.wantBlock {
-				t.Errorf("runGuard(readOnly=%v, failOpen=%v, stdin=%q) blocked=%v, want %v",
+				t.Errorf("runGuardCompat(readOnly=%v, failOpen=%v, stdin=%q) blocked=%v, want %v",
 					tt.readOnly, tt.failOpen, tt.stdin, blocked, tt.wantBlock)
 			}
 		})

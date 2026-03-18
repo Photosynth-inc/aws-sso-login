@@ -17,9 +17,11 @@ const (
 
 // Finding is the result of analysing a shell command string.
 type Finding struct {
-	Verdict Verdict
-	Reason  string
-	Profile string // non-empty when Verdict==VerdictBlock and a profile name was found
+	Verdict     Verdict
+	Reason      string
+	Profile     string // non-empty when Verdict==VerdictBlock and a profile name was found
+	CommandRisk Risk   // set when a first-class command risk is detected
+	Command     string // the command that triggered the risk (e.g. "terraform")
 }
 
 const (
@@ -28,8 +30,11 @@ const (
 )
 
 // AnalyzeCommand parses src as a Bash command string and returns a Finding that
-// describes whether a non-read-only AWS profile is used anywhere in the command,
-// including in chained commands (;, &&, ||), pipelines, nested shells (bash -c),
+// describes whether the command violates the guard policy. It checks:
+//   - AWS CLI profile (non-read-only profiles are blocked)
+//   - AWS ecosystem tool risk classification (mutate/destructive/exec are blocked)
+//
+// It handles chained commands (;, &&, ||), pipelines, nested shells (bash -c),
 // and wrapper commands (env, sudo, command).
 func AnalyzeCommand(src string) Finding {
 	if !quickHit(src) {
@@ -40,10 +45,10 @@ func AnalyzeCommand(src string) Finding {
 
 // quickHit is a fast pre-filter: if none of these keywords appear there is
 // nothing for the guard to check. Shell interpreters are included because
-// `bash -c $DYNAMIC` can hide AWS invocations. Full-path forms (/bin/sh,
+// `bash -c $DYNAMIC` can hide invocations. Full-path forms (/bin/sh,
 // /usr/bin/bash, etc.) are covered by the "/sh" and "/bash" checks.
 func quickHit(cmd string) bool {
-	return strings.Contains(cmd, "aws") ||
+	if strings.Contains(cmd, "aws") ||
 		strings.Contains(cmd, "AWS_PROFILE") ||
 		strings.Contains(cmd, "--profile") ||
 		strings.Contains(cmd, "bash") ||
@@ -56,7 +61,21 @@ func quickHit(cmd string) bool {
 		strings.Contains(cmd, " sh ") ||
 		strings.Contains(cmd, "\tsh ") ||
 		strings.Contains(cmd, " sh\t") ||
-		strings.Contains(cmd, "\tsh\t")
+		strings.Contains(cmd, "\tsh\t") {
+		return true
+	}
+	for _, name := range firstClassCommandNames() {
+		if strings.Contains(cmd, name) {
+			return true
+		}
+	}
+	// Package runners that may wrap first-class commands.
+	for _, runner := range []string{"npx", "bunx", "yarn", "pnpm"} {
+		if strings.Contains(cmd, runner) {
+			return true
+		}
+	}
+	return false
 }
 
 // worsen returns whichever Finding has the higher (more severe) Verdict.
@@ -137,7 +156,8 @@ func walkStmts(stmts []*syntax.Stmt, inheritedAmbient string, depth int) Finding
 	return out
 }
 
-// inspectCall examines a single CallExpr for AWS profile policy violations.
+// inspectCall examines a single CallExpr for AWS profile policy violations
+// and (when classify is true) command-risk classification for first-class tools.
 // It unwraps transparent wrappers (env, command, sudo, time) before checking.
 func inspectCall(call *syntax.CallExpr, ambient string, depth int) Finding {
 	if len(call.Args) == 0 {
@@ -190,21 +210,53 @@ func inspectCall(call *syntax.CallExpr, ambient string, depth int) Finding {
 		return Finding{Verdict: VerdictUnknown, Reason: "shell without static -c argument"}
 	}
 
-	if !isAWSBinary(cmd) {
-		return Finding{Verdict: VerdictAllow}
+	// AWS CLI profile check (always active when --readonly-only)
+	if isAWSBinary(cmd) {
+		fakeCall := &syntax.CallExpr{Args: remainingArgs, Assigns: call.Assigns}
+		prof, state := effectiveProfileFromCall(fakeCall, effectiveAmbient)
+		switch state {
+		case "known":
+			if !strings.HasSuffix(prof, "-ro") {
+				return Finding{Verdict: VerdictBlock, Reason: "non-read-only profile detected", Profile: prof}
+			}
+		case "unknown":
+			return Finding{Verdict: VerdictUnknown, Reason: "profile value is dynamic"}
+		}
 	}
 
-	fakeCall := &syntax.CallExpr{Args: remainingArgs, Assigns: call.Assigns}
-	prof, state := effectiveProfileFromCall(fakeCall, effectiveAmbient)
-	switch state {
-	case "known":
-		if !strings.HasSuffix(prof, "-ro") {
-			return Finding{Verdict: VerdictBlock, Reason: "non-read-only profile detected", Profile: prof}
+	// Command-risk classification for first-class AWS ecosystem tools
+	base := lastPathComponent(cmd)
+	if rule := lookupCommandRule(base); rule != nil {
+		var argStrings []string
+		for _, arg := range remainingArgs {
+			s, ok := wordStatic(arg)
+			if !ok {
+				return Finding{
+					Verdict:     VerdictUnknown,
+					Reason:      "dynamic arguments for " + base,
+					Command:     base,
+					CommandRisk: RiskUnknown,
+				}
+			}
+			argStrings = append(argStrings, s)
 		}
-	case "unknown":
-		return Finding{Verdict: VerdictUnknown, Reason: "profile value is dynamic"}
+		risk, reason := rule.Classify(argStrings)
+		return findingFromRisk(risk, reason, base)
 	}
+
 	return Finding{Verdict: VerdictAllow}
+}
+
+// findingFromRisk converts a Risk classification into a Finding.
+func findingFromRisk(risk Risk, reason, cmd string) Finding {
+	switch risk {
+	case RiskRead:
+		return Finding{Verdict: VerdictAllow, Reason: reason, Command: cmd, CommandRisk: risk}
+	case RiskMutate, RiskDestructive, RiskExec:
+		return Finding{Verdict: VerdictBlock, Reason: reason, Command: cmd, CommandRisk: risk}
+	default: // RiskUnknown
+		return Finding{Verdict: VerdictUnknown, Reason: reason, Command: cmd, CommandRisk: risk}
+	}
 }
 
 // resolveWrappers iteratively strips transparent command wrappers
@@ -225,6 +277,55 @@ func resolveWrappers(cmd string, args []*syntax.Word) (realCmd string, realArgs 
 			next, ok := wordStatic(rest[0])
 			if !ok {
 				return "", nil, envProfile, envProfileSet
+			}
+			cmd = next
+			args = rest
+
+		case "npx", "bunx":
+			// npx/bunx [flags] <package> [args...] — strip flags then unwrap.
+			rest := skipBoolFlags(args[1:])
+			if len(rest) == 0 {
+				return "", nil, envProfile, envProfileSet
+			}
+			next, ok := wordStatic(rest[0])
+			if !ok {
+				return "", nil, envProfile, envProfileSet
+			}
+			cmd = next
+			args = rest
+
+		case "yarn":
+			// yarn [global-flags] <command> [args...] — strip flags then unwrap.
+			rest := skipBoolFlags(args[1:])
+			if len(rest) == 0 {
+				return "", nil, envProfile, envProfileSet
+			}
+			next, ok := wordStatic(rest[0])
+			if !ok {
+				return "", nil, envProfile, envProfileSet
+			}
+			cmd = next
+			args = rest
+
+		case "pnpm":
+			// pnpm exec <command> [args...] or pnpm <command> [args...]
+			rest := skipBoolFlags(args[1:])
+			if len(rest) == 0 {
+				return "", nil, envProfile, envProfileSet
+			}
+			next, ok := wordStatic(rest[0])
+			if !ok {
+				return "", nil, envProfile, envProfileSet
+			}
+			if next == "exec" || next == "dlx" {
+				rest = rest[1:]
+				if len(rest) == 0 {
+					return "", nil, envProfile, envProfileSet
+				}
+				next, ok = wordStatic(rest[0])
+				if !ok {
+					return "", nil, envProfile, envProfileSet
+				}
 			}
 			cmd = next
 			args = rest

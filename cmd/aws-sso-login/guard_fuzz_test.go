@@ -141,7 +141,7 @@ func FuzzRunGuard(f *testing.F) {
 	}
 
 	f.Fuzz(func(t *testing.T, stdin string, readOnly, failOpen bool) {
-		blocked, _ := runGuard(readOnly, failOpen, strings.NewReader(stdin))
+		blocked, _ := runGuardCompat(readOnly, failOpen, strings.NewReader(stdin))
 
 		// Invariant: readOnly=false must never block.
 		if !readOnly && blocked {

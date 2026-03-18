@@ -18,7 +18,7 @@ func TestAnalyzeCommand(t *testing.T) {
 		{"aws s3 ls --profile prod-ro", VerdictAllow},
 		{"aws s3 ls --profile staging-ro", VerdictAllow},
 		{"aws s3 ls", VerdictAllow},
-		{"terraform apply --profile prod", VerdictAllow},
+		{"terraform apply --profile prod", VerdictBlock}, // terraform apply is mutate risk
 		{"echo hello", VerdictAllow},
 		{"", VerdictAllow},
 
@@ -243,9 +243,9 @@ func TestRunGuardNewCases(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			r := strings.NewReader(tt.stdin)
-			blocked, _ := runGuard(tt.readOnly, tt.failOpen, r)
+			blocked, _ := runGuardCompat(tt.readOnly, tt.failOpen, r)
 			if blocked != tt.wantBlock {
-				t.Errorf("runGuard(readOnly=%v, failOpen=%v, stdin=%q) blocked=%v, want %v",
+				t.Errorf("runGuardCompat(readOnly=%v, failOpen=%v, stdin=%q) blocked=%v, want %v",
 					tt.readOnly, tt.failOpen, tt.stdin, blocked, tt.wantBlock)
 			}
 		})

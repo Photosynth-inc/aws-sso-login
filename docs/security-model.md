@@ -33,18 +33,34 @@ For `creds` to effectively limit an agent's permissions, **all** of the followin
 |-------|-----------------|------------------------|
 | `creds` subcommand | SSO token in env vars | File read of `~/.aws/sso/cache/`, `AWS_PROFILE=` override, profile arg abuse |
 | `credential_process` only config | Profile switching to admin | Config rewrite, cache file read |
-| `guard --readonly-only` (PreToolUse hook) | `--profile non-ro` in Bash tool calls | `AWS_PROFILE=admin aws ...` env-var override, non-Bash tool calls |
+| `guard --readonly-only` (PreToolUse hook) | Non-ro `--profile`, mutating AWS ecosystem commands | Non-Bash tool calls, SDK-level calls, unrecognised commands |
 | Claude Code hook (block cache read) | Direct cache file access | Indirect access via creative bash |
 | Container / separate user | All file-based bypass | Nothing (strongest) |
 | AWS Permission Boundary (server-side) | All write actions regardless of credential source | Nothing (authoritative) |
 
+### `guard` scope
+
+`guard --readonly-only` enforces two policies via shell AST analysis:
+
+1. **AWS CLI profile check** — blocks `aws` calls where `--profile` / `AWS_PROFILE` is not `-ro` suffixed
+2. **Command-risk classification** — classifies operations from AWS ecosystem tools as `read` (allow), `mutate`/`destructive`/`exec` (block), or `unknown` (fail-closed)
+
+Guarded commands: `aws`, `terraform`, `terragrunt`, `cdk`, `sam`, `serverless`/`sls`, `kubectl`, `helm`, `eksctl`, `pulumi`, `docker`
+
+Non-obvious classification decisions:
+- `terraform plan` → read, but `terraform plan -destroy` → destructive
+- `cdk watch` → mutate (auto-redeploys)
+- `kubectl exec`, `docker run`, `serverless invoke`, `sam remote invoke` → `exec` (live system access, not infra mutation)
+- `pulumi refresh` → mutate (state mutation even without infra change)
+- Dynamic arguments (`terraform $ACTION`) → `unknown` → fail-closed
+
 ### `guard` limitations
 
-`guard` inspects the `--profile` flag in the Bash command string. It does NOT catch:
+`guard` does NOT catch:
 
-1. `AWS_PROFILE=admin aws s3 rm ...` — environment variable override in the same command
-2. Profile switching via other tools or SDKs that read `~/.aws/config` directly
-3. Commands that do not use `--profile` but inherit a privileged profile from the environment
+1. SDK-level calls or non-Bash tool invocations (e.g. Python boto3)
+2. Commands not in the first-class list (unrecognised tools pass through)
+3. Commands that inherit a privileged profile from the environment without `--profile`
 
 ## Conclusion
 
