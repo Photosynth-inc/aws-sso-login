@@ -32,7 +32,7 @@ func (r Risk) String() string {
 
 // CommandRule defines how to classify operations for a specific CLI tool.
 type CommandRule struct {
-	Names    []string                       // binary names (e.g. "terraform", "terragrunt")
+	Names    []string                           // binary names (e.g. "terraform", "terragrunt")
 	Classify func(args []string) (Risk, string) // args[0] is the command itself
 }
 
@@ -366,7 +366,7 @@ func kubectlRule() CommandRule {
 		"diff": true, "cluster-info": true, "api-resources": true,
 		"api-versions": true, "version": true, "explain": true,
 		"config": false, // handled separately
-		"auth":  false,
+		"auth":   false,
 	}
 	mutateVerbs := map[string]bool{
 		"apply": true, "create": true, "delete": true, "replace": true,
