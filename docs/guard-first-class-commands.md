@@ -135,34 +135,27 @@ Current behavior stays as a separate policy axis:
 - `exec`: ask or block depending on strictness
 - `unknown`: block unless `--fail-open`
 
-## Suggested CLI changes
+## CLI usage
 
-Current:
+`--readonly-only` enables both AWS profile checks and command-risk classification:
 
 ```bash
 aws-sso-login guard --readonly-only
 ```
 
-Suggested:
+This blocks:
+- AWS CLI calls with non-read-only profiles (not ending in `-ro`)
+- Mutating/destructive/exec operations from all first-class commands
+
+With `--on-violation=ask`, risky operations prompt the user instead of hard-blocking:
 
 ```bash
-aws-sso-login guard \
-  --readonly-only \
-  --classify-commands \
-  --block-risk destructive \
-  --ask-risk mutate,exec
+aws-sso-login guard --readonly-only --on-violation=ask
 ```
 
-Or presets:
+## Implementation
 
-```bash
-aws-sso-login guard --policy conservative  # allow read, ask mutate+exec, block destructive+unknown
-aws-sso-login guard --policy strict        # allow read, block everything else
-```
-
-## Suggested implementation shape
-
-Data-driven rule table instead of hardcoded `switch`:
+Data-driven rule table in `commandrules.go`:
 
 ```go
 type Risk int
@@ -179,22 +172,10 @@ type CommandRule struct {
     Names    []string
     Classify func(args []string) (Risk, string)
 }
-
-var rules = []CommandRule{
-    awsRule(),
-    terraformRule(),
-    terragruntRule(),
-    cdkRule(),
-    samRule(),
-    serverlessRule(),
-    // P1
-    kubectlRule(),
-    helmRule(),
-    eksctlRule(),
-    pulumiRule(),
-    dockerRule(),
-}
 ```
+
+All rules are registered in `commandRules` and looked up by command basename via `commandRuleMap`.
+Classification is always active when `--readonly-only` is set — no separate flag needed.
 
 ## Bottom line
 

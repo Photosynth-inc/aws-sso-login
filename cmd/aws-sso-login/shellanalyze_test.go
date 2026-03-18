@@ -18,7 +18,7 @@ func TestAnalyzeCommand(t *testing.T) {
 		{"aws s3 ls --profile prod-ro", VerdictAllow},
 		{"aws s3 ls --profile staging-ro", VerdictAllow},
 		{"aws s3 ls", VerdictAllow},
-		{"terraform apply --profile prod", VerdictAllow},
+		{"terraform apply --profile prod", VerdictBlock}, // terraform apply is mutate risk
 		{"echo hello", VerdictAllow},
 		{"", VerdictAllow},
 

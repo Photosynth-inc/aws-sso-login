@@ -108,7 +108,7 @@ func FuzzAnalyzeCommand(f *testing.F) {
 		got := AnalyzeCommand(cmd)
 
 		// Invariant: if quickHit returns false, result must be VerdictAllow.
-		if !quickHit(cmd, false) && got.Verdict != VerdictAllow {
+		if !quickHit(cmd) && got.Verdict != VerdictAllow {
 			t.Errorf("quickHit miss but non-Allow result for %q: %v", cmd, got.Verdict)
 		}
 		// Invariant: VerdictBlock requires a non-empty reason.

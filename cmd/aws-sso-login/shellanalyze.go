@@ -20,7 +20,7 @@ type Finding struct {
 	Verdict     Verdict
 	Reason      string
 	Profile     string // non-empty when Verdict==VerdictBlock and a profile name was found
-	CommandRisk Risk   // set when --classify-commands detects a risky operation
+	CommandRisk Risk   // set when a first-class command risk is detected
 	Command     string // the command that triggered the risk (e.g. "terraform")
 }
 
@@ -30,24 +30,24 @@ const (
 )
 
 // AnalyzeCommand parses src as a Bash command string and returns a Finding that
-// describes whether a non-read-only AWS profile is used anywhere in the command,
-// including in chained commands (;, &&, ||), pipelines, nested shells (bash -c),
+// describes whether the command violates the guard policy. It checks:
+//   - AWS CLI profile (non-read-only profiles are blocked)
+//   - AWS ecosystem tool risk classification (mutate/destructive/exec are blocked)
+//
+// It handles chained commands (;, &&, ||), pipelines, nested shells (bash -c),
 // and wrapper commands (env, sudo, command).
-// classifyCommands enables risk classification for first-class AWS ecosystem tools.
-func AnalyzeCommand(src string, classifyCommands ...bool) Finding {
-	classify := len(classifyCommands) > 0 && classifyCommands[0]
-	if !quickHit(src, classify) {
+func AnalyzeCommand(src string) Finding {
+	if !quickHit(src) {
 		return Finding{Verdict: VerdictAllow}
 	}
-	return analyzeRecursive(src, 0, "", classify)
+	return analyzeRecursive(src, 0, "")
 }
 
 // quickHit is a fast pre-filter: if none of these keywords appear there is
 // nothing for the guard to check. Shell interpreters are included because
-// `bash -c $DYNAMIC` can hide AWS invocations. Full-path forms (/bin/sh,
+// `bash -c $DYNAMIC` can hide invocations. Full-path forms (/bin/sh,
 // /usr/bin/bash, etc.) are covered by the "/sh" and "/bash" checks.
-// When classify is true, first-class command names are also checked.
-func quickHit(cmd string, classify bool) bool {
+func quickHit(cmd string) bool {
 	if strings.Contains(cmd, "aws") ||
 		strings.Contains(cmd, "AWS_PROFILE") ||
 		strings.Contains(cmd, "--profile") ||
@@ -64,11 +64,9 @@ func quickHit(cmd string, classify bool) bool {
 		strings.Contains(cmd, "\tsh\t") {
 		return true
 	}
-	if classify {
-		for _, name := range firstClassCommandNames() {
-			if strings.Contains(cmd, name) {
-				return true
-			}
+	for _, name := range firstClassCommandNames() {
+		if strings.Contains(cmd, name) {
+			return true
 		}
 	}
 	return false
@@ -82,7 +80,7 @@ func worsen(a, b Finding) Finding {
 	return a
 }
 
-func analyzeRecursive(src string, depth int, inheritedAmbient string, classify bool) Finding {
+func analyzeRecursive(src string, depth int, inheritedAmbient string) Finding {
 	if depth > maxAnalyzeDepth || len(src) > maxCommandLen {
 		return Finding{Verdict: VerdictUnknown, Reason: "depth/size limit exceeded"}
 	}
@@ -93,13 +91,13 @@ func analyzeRecursive(src string, depth int, inheritedAmbient string, classify b
 		return Finding{Verdict: VerdictUnknown, Reason: "shell parse error"}
 	}
 
-	return walkStmts(f.Stmts, inheritedAmbient, depth, classify)
+	return walkStmts(f.Stmts, inheritedAmbient, depth)
 }
 
 // walkStmts processes a list of statements in document order, tracking
 // AWS_PROFILE assignments as ambient context. Subshells are analysed in an
 // isolated scope so their assignments do not propagate to the outer ambient.
-func walkStmts(stmts []*syntax.Stmt, inheritedAmbient string, depth int, classify bool) Finding {
+func walkStmts(stmts []*syntax.Stmt, inheritedAmbient string, depth int) Finding {
 	if depth > maxAnalyzeDepth {
 		return Finding{Verdict: VerdictUnknown, Reason: "depth/size limit exceeded"}
 	}
@@ -112,7 +110,7 @@ func walkStmts(stmts []*syntax.Stmt, inheritedAmbient string, depth int, classif
 			switch node := n.(type) {
 			case *syntax.Subshell:
 				// Isolated scope: export/declare inside must not leak to outer ambient.
-				out = worsen(out, walkStmts(node.Stmts, ambient, depth+1, classify))
+				out = worsen(out, walkStmts(node.Stmts, ambient, depth+1))
 				return false // prevent outer walk from descending into subshell
 
 			case *syntax.DeclClause:
@@ -144,7 +142,7 @@ func walkStmts(stmts []*syntax.Stmt, inheritedAmbient string, depth int, classif
 					}
 					return true
 				}
-				out = worsen(out, inspectCall(node, ambient, depth, classify))
+				out = worsen(out, inspectCall(node, ambient, depth))
 			}
 			return true
 		})
@@ -155,7 +153,7 @@ func walkStmts(stmts []*syntax.Stmt, inheritedAmbient string, depth int, classif
 // inspectCall examines a single CallExpr for AWS profile policy violations
 // and (when classify is true) command-risk classification for first-class tools.
 // It unwraps transparent wrappers (env, command, sudo, time) before checking.
-func inspectCall(call *syntax.CallExpr, ambient string, depth int, classify bool) Finding {
+func inspectCall(call *syntax.CallExpr, ambient string, depth int) Finding {
 	if len(call.Args) == 0 {
 		return Finding{Verdict: VerdictAllow}
 	}
@@ -195,7 +193,7 @@ func inspectCall(call *syntax.CallExpr, ambient string, depth int, classify bool
 				}
 				shellAmbient = val
 			}
-			return analyzeRecursive(inner, depth+1, shellAmbient, classify)
+			return analyzeRecursive(inner, depth+1, shellAmbient)
 		}
 		// -c flag present but argument is dynamic.
 		if shellHasCFlag(remainingArgs) {
@@ -221,26 +219,23 @@ func inspectCall(call *syntax.CallExpr, ambient string, depth int, classify bool
 	}
 
 	// Command-risk classification for first-class AWS ecosystem tools
-	if classify {
-		base := lastPathComponent(cmd)
-		if rule := lookupCommandRule(base); rule != nil {
-			// Extract static args for classification
-			var argStrings []string
-			for _, arg := range remainingArgs {
-				s, ok := wordStatic(arg)
-				if !ok {
-					return Finding{
-						Verdict:     VerdictUnknown,
-						Reason:      "dynamic arguments for " + base,
-						Command:     base,
-						CommandRisk: RiskUnknown,
-					}
+	base := lastPathComponent(cmd)
+	if rule := lookupCommandRule(base); rule != nil {
+		var argStrings []string
+		for _, arg := range remainingArgs {
+			s, ok := wordStatic(arg)
+			if !ok {
+				return Finding{
+					Verdict:     VerdictUnknown,
+					Reason:      "dynamic arguments for " + base,
+					Command:     base,
+					CommandRisk: RiskUnknown,
 				}
-				argStrings = append(argStrings, s)
 			}
-			risk, reason := rule.Classify(argStrings)
-			return findingFromRisk(risk, reason, base)
+			argStrings = append(argStrings, s)
 		}
+		risk, reason := rule.Classify(argStrings)
+		return findingFromRisk(risk, reason, base)
 	}
 
 	return Finding{Verdict: VerdictAllow}

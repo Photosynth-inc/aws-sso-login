@@ -173,11 +173,7 @@ func main() {
 				Flags: []cli.Flag{
 					&cli.BoolFlag{
 						Name:  "readonly-only",
-						Usage: "Block AWS CLI calls using a non-read-only profile (profiles not ending in -ro)",
-					},
-					&cli.BoolFlag{
-						Name:  "classify-commands",
-						Usage: "Classify AWS ecosystem commands (terraform, cdk, sam, etc.) by risk level and block mutating/destructive operations",
+						Usage: "Block non-read-only AWS CLI profiles and mutating/destructive AWS ecosystem commands (terraform, cdk, sam, etc.)",
 					},
 					&cli.BoolFlag{
 						Name:  "fail-open",

@@ -672,9 +672,8 @@ func extractAWSProfile(command string) (string, bool) {
 
 // guardOptions holds the parsed flags for the guard command.
 type guardOptions struct {
-	readOnly         bool
-	failOpen         bool
-	classifyCommands bool
+	readOnly bool
+	failOpen bool
 }
 
 // analyzeGuard parses the hook payload from r and analyses the command string
@@ -685,8 +684,8 @@ func analyzeGuard(opts guardOptions, r io.Reader) (Finding, string) {
 		if errors.Is(err, io.EOF) {
 			return Finding{Verdict: VerdictAllow}, "" // empty stdin — not a hook invocation
 		}
-		// Malformed JSON: fail-closed when --readonly-only or --classify-commands, unless --fail-open.
-		if (opts.readOnly || opts.classifyCommands) && !opts.failOpen {
+		// Malformed JSON: fail-closed when --readonly-only, unless --fail-open.
+		if opts.readOnly && !opts.failOpen {
 			return Finding{Verdict: VerdictBlock, Reason: "malformed hook payload (fail-closed)"}, ""
 		}
 		return Finding{Verdict: VerdictAllow}, ""
@@ -699,11 +698,11 @@ func analyzeGuard(opts guardOptions, r io.Reader) (Finding, string) {
 		return Finding{Verdict: VerdictAllow}, ""
 	}
 
-	if !opts.readOnly && !opts.classifyCommands {
+	if !opts.readOnly {
 		return Finding{Verdict: VerdictAllow}, ""
 	}
 
-	f := AnalyzeCommand(payload.ToolInput.Command, opts.classifyCommands)
+	f := AnalyzeCommand(payload.ToolInput.Command)
 
 	// Treat Unknown as Block when fail-closed.
 	if f.Verdict == VerdictUnknown && !opts.failOpen {
@@ -745,9 +744,8 @@ func handleGuard(_ context.Context, c *cli.Command) error {
 	}
 
 	opts := guardOptions{
-		readOnly:         c.Bool("readonly-only"),
-		failOpen:         c.Bool("fail-open"),
-		classifyCommands: c.Bool("classify-commands"),
+		readOnly: c.Bool("readonly-only"),
+		failOpen: c.Bool("fail-open"),
 	}
 	f, profile := analyzeGuard(opts, os.Stdin)
 	if f.Verdict != VerdictBlock {

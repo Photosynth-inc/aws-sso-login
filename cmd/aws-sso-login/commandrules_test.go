@@ -124,14 +124,13 @@ func TestClassifyCommands(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.command, func(t *testing.T) {
-			got := AnalyzeCommand(tt.command, true)
+			got := AnalyzeCommand(tt.command)
 			if got.Verdict != tt.verdict {
-				t.Errorf("AnalyzeCommand(%q, classify=true) verdict=%v, want %v (reason: %q)",
+				t.Errorf("AnalyzeCommand(%q) verdict=%v, want %v (reason: %q)",
 					tt.command, got.Verdict, tt.verdict, got.Reason)
 			}
-			// Only check risk for classified commands (not pass-through)
 			if got.Command != "" && got.CommandRisk != tt.risk {
-				t.Errorf("AnalyzeCommand(%q, classify=true) risk=%v, want %v (reason: %q)",
+				t.Errorf("AnalyzeCommand(%q) risk=%v, want %v (reason: %q)",
 					tt.command, got.CommandRisk, tt.risk, got.Reason)
 			}
 		})
@@ -143,7 +142,6 @@ func TestClassifyCommandsWithWrappers(t *testing.T) {
 		command string
 		verdict Verdict
 	}{
-		// wrappers should be resolved before classification
 		{"sudo terraform apply", VerdictBlock},
 		{"env terraform destroy", VerdictBlock},
 		{"command terraform plan", VerdictAllow},
@@ -157,9 +155,9 @@ func TestClassifyCommandsWithWrappers(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.command, func(t *testing.T) {
-			got := AnalyzeCommand(tt.command, true)
+			got := AnalyzeCommand(tt.command)
 			if got.Verdict != tt.verdict {
-				t.Errorf("AnalyzeCommand(%q, classify=true) verdict=%v, want %v (reason: %q)",
+				t.Errorf("AnalyzeCommand(%q) verdict=%v, want %v (reason: %q)",
 					tt.command, got.Verdict, tt.verdict, got.Reason)
 			}
 		})
@@ -171,7 +169,6 @@ func TestClassifyCommandsDynamic(t *testing.T) {
 		command string
 		verdict Verdict
 	}{
-		// dynamic args for classified commands → Unknown → Block (fail-closed)
 		{"terraform $ACTION", VerdictUnknown},
 		{"kubectl $VERB pods", VerdictUnknown},
 		{"cdk $CMD", VerdictUnknown},
@@ -179,32 +176,7 @@ func TestClassifyCommandsDynamic(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.command, func(t *testing.T) {
-			got := AnalyzeCommand(tt.command, true)
-			if got.Verdict != tt.verdict {
-				t.Errorf("AnalyzeCommand(%q, classify=true) verdict=%v, want %v (reason: %q)",
-					tt.command, got.Verdict, tt.verdict, got.Reason)
-			}
-		})
-	}
-}
-
-func TestClassifyCommandsBackwardsCompat(t *testing.T) {
-	// Without classify=true, non-aws commands should pass through
-	tests := []struct {
-		command string
-		verdict Verdict
-	}{
-		{"terraform apply", VerdictAllow},
-		{"cdk deploy", VerdictAllow},
-		{"kubectl delete pod foo", VerdictAllow},
-		// aws profile check still works without classify
-		{"aws s3 ls --profile prod", VerdictBlock},
-		{"aws s3 ls --profile prod-ro", VerdictAllow},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.command, func(t *testing.T) {
-			got := AnalyzeCommand(tt.command) // no classify flag
+			got := AnalyzeCommand(tt.command)
 			if got.Verdict != tt.verdict {
 				t.Errorf("AnalyzeCommand(%q) verdict=%v, want %v (reason: %q)",
 					tt.command, got.Verdict, tt.verdict, got.Reason)
@@ -226,23 +198,23 @@ func TestRunGuardClassifyCommands(t *testing.T) {
 		opts      guardOptions
 		wantBlock bool
 	}{
-		// classify-commands blocks mutate/destructive
-		{"block terraform apply", makePayload("terraform apply"), guardOptions{classifyCommands: true}, true},
-		{"block terraform destroy", makePayload("terraform destroy"), guardOptions{classifyCommands: true}, true},
-		{"allow terraform plan", makePayload("terraform plan"), guardOptions{classifyCommands: true}, false},
-		{"block cdk deploy", makePayload("cdk deploy"), guardOptions{classifyCommands: true}, true},
-		{"allow cdk diff", makePayload("cdk diff"), guardOptions{classifyCommands: true}, false},
+		// --readonly-only blocks mutate/destructive commands
+		{"block terraform apply", makePayload("terraform apply"), guardOptions{readOnly: true}, true},
+		{"block terraform destroy", makePayload("terraform destroy"), guardOptions{readOnly: true}, true},
+		{"allow terraform plan", makePayload("terraform plan"), guardOptions{readOnly: true}, false},
+		{"block cdk deploy", makePayload("cdk deploy"), guardOptions{readOnly: true}, true},
+		{"allow cdk diff", makePayload("cdk diff"), guardOptions{readOnly: true}, false},
 
-		// classify + readonly-only: both checks active
-		{"block aws non-ro + classify", makePayload("aws s3 ls --profile prod"), guardOptions{readOnly: true, classifyCommands: true}, true},
-		{"allow aws ro + classify", makePayload("aws s3 ls --profile prod-ro"), guardOptions{readOnly: true, classifyCommands: true}, false},
+		// aws profile check + command risk both active
+		{"block aws non-ro", makePayload("aws s3 ls --profile prod"), guardOptions{readOnly: true}, true},
+		{"allow aws ro", makePayload("aws s3 ls --profile prod-ro"), guardOptions{readOnly: true}, false},
 
-		// classify off: non-aws commands pass through
-		{"allow terraform apply without classify", makePayload("terraform apply"), guardOptions{readOnly: true}, false},
+		// without --readonly-only: nothing blocked
+		{"allow terraform apply without flag", makePayload("terraform apply"), guardOptions{}, false},
 
-		// fail-open with classify
-		{"allow unknown fail-open", makePayload("terraform $ACTION"), guardOptions{classifyCommands: true, failOpen: true}, false},
-		{"block unknown fail-closed", makePayload("terraform $ACTION"), guardOptions{classifyCommands: true}, true},
+		// fail-open
+		{"allow unknown fail-open", makePayload("terraform $ACTION"), guardOptions{readOnly: true, failOpen: true}, false},
+		{"block unknown fail-closed", makePayload("terraform $ACTION"), guardOptions{readOnly: true}, true},
 	}
 
 	for _, tt := range tests {
