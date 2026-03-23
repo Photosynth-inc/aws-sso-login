@@ -496,9 +496,13 @@ func wordStatic(w *syntax.Word) (string, bool) {
 // wordHasPrefix reports whether the accumulated static prefix of a Word starts
 // with the given prefix. It concatenates consecutive literal parts until a
 // dynamic part is reached, then checks conservatively: if the accumulated static
-// part is itself a prefix of the target prefix (could still become --profile=
-// after dynamic expansion), it returns true. This handles `"--profile=$P"` and
-// `"--pro${X}file=$P"`.
+// part is itself a non-empty prefix of the target prefix (could still become
+// --profile= after dynamic expansion), it returns true. This handles
+// `"--profile=$P"` and `"--pro${X}file=$P"`.
+//
+// When the accumulated static prefix is empty and a dynamic part is encountered,
+// we cannot infer anything — the word could expand to anything, but we should
+// not treat it as matching an arbitrary prefix.
 func wordHasPrefix(w *syntax.Word, prefix string) bool {
 	var b strings.Builder
 	for _, part := range w.Parts {
@@ -512,15 +516,13 @@ func wordHasPrefix(w *syntax.Word, prefix string) bool {
 				lit, ok := inner.(*syntax.Lit)
 				if !ok {
 					acc := b.String()
-					// Conservative: if what we have so far is a prefix of the target
-					// (meaning dynamic content could complete it), report a match.
-					return strings.HasPrefix(acc, prefix) || strings.HasPrefix(prefix, acc)
+					return strings.HasPrefix(acc, prefix) || (len(acc) > 0 && strings.HasPrefix(prefix, acc))
 				}
 				b.WriteString(lit.Value)
 			}
 		default:
 			acc := b.String()
-			return strings.HasPrefix(acc, prefix) || strings.HasPrefix(prefix, acc)
+			return strings.HasPrefix(acc, prefix) || (len(acc) > 0 && strings.HasPrefix(prefix, acc))
 		}
 	}
 	return strings.HasPrefix(b.String(), prefix)

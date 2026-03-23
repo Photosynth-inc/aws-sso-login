@@ -122,6 +122,10 @@ func TestAnalyzeCommand(t *testing.T) {
 		// command substitution: aws inside $() is analyzed
 		{"echo $(aws s3 ls --profile prod)", VerdictBlock},
 		{"echo $(aws s3 ls --profile prod-ro)", VerdictAllow},
+
+		// dynamic args (e.g. $(date ...)) must not be mistaken for --profile
+		{"AWS_PROFILE=prod-ro aws s3 ls $(echo foo)", VerdictAllow},
+		{`AWS_PROFILE=prod-ro aws cloudtrail lookup-events --start-time $(date -u) --region ap-northeast-1`, VerdictAllow},
 	}
 
 	for _, tt := range tests {
