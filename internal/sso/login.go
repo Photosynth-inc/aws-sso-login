@@ -67,11 +67,11 @@ func RunSSOLogin(ctx context.Context, ssoStartURL, ssoRegion, ssoSession string,
 	printAuthorizationInstructions(opts.Output, aws.ToString(auth.VerificationUriComplete), aws.ToString(auth.UserCode), opts.OpenBrowser)
 	if opts.OpenBrowser {
 		if err := opts.BrowserOpener(aws.ToString(auth.VerificationUriComplete)); err != nil {
-			fmt.Fprintf(opts.Output, "Warning: failed to open browser automatically: %v\n\n", err)
+			writef(opts.Output, "Warning: failed to open browser automatically: %v\n\n", err)
 		}
 	}
 
-	fmt.Fprintln(opts.Output, "Waiting for authorization...")
+	writeln(opts.Output, "Waiting for authorization...")
 
 	// Step 4: Poll for token
 	interval := int(auth.Interval)
@@ -114,7 +114,7 @@ func RunSSOLogin(ctx context.Context, ssoStartURL, ssoRegion, ssoSession string,
 			return fmt.Errorf("failed to save token: %w", err)
 		}
 
-		fmt.Fprintln(opts.Output, "\n✓ SSO login successful!")
+		writeln(opts.Output, "\n✓ SSO login successful!")
 		return nil
 	}
 
@@ -161,15 +161,15 @@ func normalizeLoginOptions(opts LoginOptions) LoginOptions {
 
 func printAuthorizationInstructions(w io.Writer, verificationURL, userCode string, openBrowser bool) {
 	if !openBrowser {
-		fmt.Fprintln(w, "Headless mode: browser auto-open disabled.")
+		writeln(w, "Headless mode: browser auto-open disabled.")
 	}
-	fmt.Fprintln(w)
-	fmt.Fprintln(w, "Open the following URL in your browser:")
-	fmt.Fprintln(w)
-	fmt.Fprintf(w, "  %s\n\n", verificationURL)
-	fmt.Fprintf(w, "Confirmation code: %s\n\n", userCode)
+	writeln(w, "")
+	writeln(w, "Open the following URL in your browser:")
+	writeln(w, "")
+	writef(w, "  %s\n\n", verificationURL)
+	writef(w, "Confirmation code: %s\n\n", userCode)
 	if !openBrowser {
-		fmt.Fprintln(w, "Authorize the device in any browser, then return here.")
+		writeln(w, "Authorize the device in any browser, then return here.")
 	}
 }
 
@@ -177,4 +177,12 @@ func openBrowser(url string) error {
 	// macOS
 	cmd := exec.Command("open", url)
 	return cmd.Start()
+}
+
+func writeln(w io.Writer, args ...any) {
+	_, _ = fmt.Fprintln(w, args...)
+}
+
+func writef(w io.Writer, format string, args ...any) {
+	_, _ = fmt.Fprintf(w, format, args...)
 }
