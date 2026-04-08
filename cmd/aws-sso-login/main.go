@@ -40,7 +40,23 @@ func emitJSON(v any) error {
 func main() {
 	ctx := context.Background()
 
-	cmd := &cli.Command{
+	cmd := newCommand()
+
+	if err := cmd.Run(ctx, os.Args); err != nil {
+		var exitErr *ExitError
+		if errors.As(err, &exitErr) {
+			if !exitErr.Silent {
+				fmt.Fprintf(os.Stderr, "Error: %v\n", exitErr.Err)
+			}
+			os.Exit(exitErr.Code)
+		}
+		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+		os.Exit(1)
+	}
+}
+
+func newCommand() *cli.Command {
+	return &cli.Command{
 		Name:    "aws-sso-login",
 		Usage:   "Interactive AWS SSO (Identity Center) login CLI",
 		Version: version,
@@ -64,11 +80,15 @@ func main() {
 				Aliases: []string{"ro"},
 				Usage:   "Use ReadOnly profile (auto-select -ro suffix)",
 			},
+			&cli.BoolFlag{
+				Name:  "headless",
+				Usage: "Do not auto-open a browser; print the device authorization URL and wait",
+			},
 		},
 		Commands: []*cli.Command{
 			{
 				Name:   "login",
-				Usage:  "Authenticate to AWS SSO (browser flow only, no profile selection)",
+				Usage:  "Authenticate to AWS SSO (browser or headless device flow, no profile selection)",
 				Action: handleLogin,
 				Flags: []cli.Flag{
 					&cli.StringFlag{
@@ -188,18 +208,6 @@ func main() {
 			},
 		},
 		Action: handleDefault,
-	}
-
-	if err := cmd.Run(ctx, os.Args); err != nil {
-		var exitErr *ExitError
-		if errors.As(err, &exitErr) {
-			if !exitErr.Silent {
-				fmt.Fprintf(os.Stderr, "Error: %v\n", exitErr.Err)
-			}
-			os.Exit(exitErr.Code)
-		}
-		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-		os.Exit(1)
 	}
 }
 

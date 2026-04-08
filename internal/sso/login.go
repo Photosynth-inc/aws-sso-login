@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -16,12 +17,21 @@ import (
 	ssooidctypes "github.com/aws/aws-sdk-go-v2/service/ssooidc/types"
 )
 
+// LoginOptions controls how the device authorization flow is presented.
+type LoginOptions struct {
+	OpenBrowser   bool
+	Output        io.Writer
+	BrowserOpener func(string) error
+}
+
 // RunSSOLogin performs SSO login using OIDC device authorization flow.
 // This works even without any existing ~/.aws/config profiles.
 // ssoSession is the [sso-session <name>] value from ~/.aws/config; it is used
 // to produce a cache filename that the AWS CLI v2 can locate. Pass "" for
 // legacy (non-sso-session) profiles, in which case the start URL is used.
-func RunSSOLogin(ctx context.Context, ssoStartURL, ssoRegion, ssoSession string) error {
+func RunSSOLogin(ctx context.Context, ssoStartURL, ssoRegion, ssoSession string, opts LoginOptions) error {
+	opts = normalizeLoginOptions(opts)
+
 	cfg, err := awsconfig.LoadDefaultConfig(ctx,
 		awsconfig.WithRegion(ssoRegion),
 		awsconfig.WithCredentialsProvider(aws.AnonymousCredentials{}),
@@ -54,14 +64,14 @@ func RunSSOLogin(ctx context.Context, ssoStartURL, ssoRegion, ssoSession string)
 	}
 
 	// Step 3: Ask user to authorize in browser
-	fmt.Printf("\nOpen the following URL in your browser:\n\n")
-	fmt.Printf("  %s\n\n", aws.ToString(auth.VerificationUriComplete))
-	fmt.Printf("Confirmation code: %s\n\n", aws.ToString(auth.UserCode))
+	printAuthorizationInstructions(opts.Output, aws.ToString(auth.VerificationUriComplete), aws.ToString(auth.UserCode), opts.OpenBrowser)
+	if opts.OpenBrowser {
+		if err := opts.BrowserOpener(aws.ToString(auth.VerificationUriComplete)); err != nil {
+			writef(opts.Output, "Warning: failed to open browser automatically: %v\n\n", err)
+		}
+	}
 
-	// Try to open browser
-	openBrowser(aws.ToString(auth.VerificationUriComplete))
-
-	fmt.Println("Waiting for authorization...")
+	writeln(opts.Output, "Waiting for authorization...")
 
 	// Step 4: Poll for token
 	interval := int(auth.Interval)
@@ -104,7 +114,7 @@ func RunSSOLogin(ctx context.Context, ssoStartURL, ssoRegion, ssoSession string)
 			return fmt.Errorf("failed to save token: %w", err)
 		}
 
-		fmt.Println("\n✓ SSO login successful!")
+		writeln(opts.Output, "\n✓ SSO login successful!")
 		return nil
 	}
 
@@ -139,8 +149,40 @@ func saveTokenToCache(accessToken string, expiresIn int, startURL, region, ssoSe
 	return os.WriteFile(path, []byte(content), 0600)
 }
 
-func openBrowser(url string) {
+func normalizeLoginOptions(opts LoginOptions) LoginOptions {
+	if opts.Output == nil {
+		opts.Output = os.Stdout
+	}
+	if opts.BrowserOpener == nil {
+		opts.BrowserOpener = openBrowser
+	}
+	return opts
+}
+
+func printAuthorizationInstructions(w io.Writer, verificationURL, userCode string, openBrowser bool) {
+	if !openBrowser {
+		writeln(w, "Headless mode: browser auto-open disabled.")
+	}
+	writeln(w, "")
+	writeln(w, "Open the following URL in your browser:")
+	writeln(w, "")
+	writef(w, "  %s\n\n", verificationURL)
+	writef(w, "Confirmation code: %s\n\n", userCode)
+	if !openBrowser {
+		writeln(w, "Authorize the device in any browser, then return here.")
+	}
+}
+
+func openBrowser(url string) error {
 	// macOS
 	cmd := exec.Command("open", url)
-	_ = cmd.Start()
+	return cmd.Start()
+}
+
+func writeln(w io.Writer, args ...any) {
+	_, _ = fmt.Fprintln(w, args...)
+}
+
+func writef(w io.Writer, format string, args ...any) {
+	_, _ = fmt.Fprintf(w, format, args...)
 }

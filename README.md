@@ -7,6 +7,7 @@ Interactive AWS SSO (Identity Center) login CLI with automatic profile generatio
 - **Interactive profile selection** - Choose AWS profiles with fuzzy search
 - **Auto-generate profiles** - Create profiles from Identity Center (known roles auto-detected, custom roles via `--include-roles`)
 - **Session management** - Check login status and expiration
+- **Headless login** - Skip browser auto-open and complete device auth manually
 - **ReadOnly mode** - Safe account investigation with read-only access
 - **Scoped credentials** - Export temporary credentials for a specific role via `creds`
 
@@ -24,7 +25,7 @@ go install github.com/Photosynth-inc/aws-sso-login/cmd/aws-sso-login@latest
 
 | Command | Purpose |
 |---------|---------|
-| `login` (default) | Authenticate to AWS SSO (browser flow only) |
+| `login` (default) | Authenticate to AWS SSO (browser or headless device flow) |
 | `use` | Select a profile and export `AWS_PROFILE` |
 | `creds` | Get scoped temporary credentials via `GetRoleCredentials` API |
 | `sync` | Generate profiles from Identity Center |
@@ -45,6 +46,17 @@ aws-sso-login login
 
 # Explicit start URL
 aws-sso-login login --sso-start-url https://your-domain.awsapps.com/start/
+
+# Headless: print the verification URL instead of opening a browser
+aws-sso-login login --headless
+```
+
+`--headless` also works on flows that auto-login, for example:
+
+```bash
+aws-sso-login use myapp-dev --headless
+aws-sso-login creds myapp-dev-ro --headless
+aws-sso-login sync --headless --dry-run
 ```
 
 ### use
