@@ -16,6 +16,13 @@ import (
 	"github.com/urfave/cli/v3"
 )
 
+var (
+	runSSOLogin         = sso.RunSSOLogin
+	getTokenForStartURL = sso.GetTokenForStartURL
+	getLatestToken      = sso.GetLatestToken
+	validateToken       = sso.ValidateToken
+)
+
 // --- JSON result types ---
 
 type LoginResult struct {
@@ -61,6 +68,12 @@ type SyncProfileItem struct {
 	Name      string `json:"name"`
 	AccountID string `json:"accountId"`
 	RoleName  string `json:"roleName"`
+}
+
+func loginOptions(c *cli.Command) sso.LoginOptions {
+	return sso.LoginOptions{
+		OpenBrowser: !c.Bool("headless"),
+	}
 }
 
 // --- login (auth-only) ---
@@ -111,8 +124,8 @@ func handleLogin(ctx context.Context, c *cli.Command) error {
 
 	// Check if already authenticated (skip when --force is specified)
 	if !c.Bool("force") {
-		if token, err := sso.GetTokenForStartURL(ssoStartURL); err == nil {
-			if validateErr := sso.ValidateToken(ctx, token.AccessToken, ssoRegion); validateErr == nil {
+		if token, err := getTokenForStartURL(ssoStartURL); err == nil {
+			if validateErr := validateToken(ctx, token.AccessToken, ssoRegion); validateErr == nil {
 				if opts.JSON {
 					return emitJSON(LoginResult{
 						StartURL:  ssoStartURL,
@@ -131,11 +144,11 @@ func handleLogin(ctx context.Context, c *cli.Command) error {
 	}
 
 	// Trigger browser login
-	if err := sso.RunSSOLogin(ctx, ssoStartURL, ssoRegion, ssoSession); err != nil {
+	if err := runSSOLogin(ctx, ssoStartURL, ssoRegion, ssoSession, loginOptions(c)); err != nil {
 		return fmt.Errorf("SSO login failed: %w", err)
 	}
 
-	token, err := sso.GetTokenForStartURL(ssoStartURL)
+	token, err := getTokenForStartURL(ssoStartURL)
 	if err != nil {
 		return fmt.Errorf("failed to retrieve token after login: %w", err)
 	}
@@ -201,13 +214,13 @@ func handleUse(ctx context.Context, c *cli.Command) error {
 	startURL := cfg.ResolveStartURL(selectedProfile)
 	ssoRegion := cfg.ResolveRegion(selectedProfile)
 	if startURL != "" {
-		if _, tokenErr := sso.GetTokenForStartURL(startURL); tokenErr != nil {
-			if fallbackToken, fallbackErr := sso.GetLatestToken(); fallbackErr != nil {
+		if _, tokenErr := getTokenForStartURL(startURL); tokenErr != nil {
+			if fallbackToken, fallbackErr := getLatestToken(); fallbackErr != nil {
 				if opts.JSON {
 					return fmt.Errorf("no valid SSO session. Run 'aws-sso-login login' first")
 				}
 				logInfo("No valid SSO session. Starting login...")
-				if loginErr := sso.RunSSOLogin(ctx, startURL, ssoRegion, selectedProfile.SSOSession); loginErr != nil {
+				if loginErr := runSSOLogin(ctx, startURL, ssoRegion, selectedProfile.SSOSession, loginOptions(c)); loginErr != nil {
 					return fmt.Errorf("SSO login failed: %w", loginErr)
 				}
 			} else if fallbackToken.StartURL != startURL {
@@ -263,20 +276,20 @@ func handleCreds(ctx context.Context, c *cli.Command) error {
 
 	// Resolve SSO token
 	var token *sso.CachedToken
-	token, err = sso.GetTokenForStartURL(startURL)
+	token, err = getTokenForStartURL(startURL)
 	if err != nil {
-		token, err = sso.GetLatestToken()
+		token, err = getLatestToken()
 		if err != nil {
 			if opts.JSON || c.String("format") == "json" {
 				return fmt.Errorf("no valid SSO session. Run 'aws-sso-login login' first")
 			}
 			logInfo("No valid SSO session. Starting login...")
-			if loginErr := sso.RunSSOLogin(ctx, startURL, ssoRegion, profile.SSOSession); loginErr != nil {
+			if loginErr := runSSOLogin(ctx, startURL, ssoRegion, profile.SSOSession, loginOptions(c)); loginErr != nil {
 				return fmt.Errorf("SSO login failed: %w", loginErr)
 			}
-			token, err = sso.GetTokenForStartURL(startURL)
+			token, err = getTokenForStartURL(startURL)
 			if err != nil {
-				token, err = sso.GetLatestToken()
+				token, err = getLatestToken()
 				if err != nil {
 					return fmt.Errorf("failed to get SSO token after login: %w", err)
 				}
@@ -445,21 +458,21 @@ func handleSync(ctx context.Context, c *cli.Command) error {
 	var token *sso.CachedToken
 	var err error
 
-	token, err = sso.GetTokenForStartURL(ssoStartURL)
+	token, err = getTokenForStartURL(ssoStartURL)
 	if err != nil {
-		token, err = sso.GetLatestToken()
+		token, err = getLatestToken()
 		if err != nil {
 			// In --json mode, never trigger interactive browser login
 			if opts.JSON {
 				return fmt.Errorf("no valid SSO session found. Run 'aws-sso-login login' first")
 			}
 			logInfo("No valid SSO session found. Starting SSO login...")
-			if loginErr := sso.RunSSOLogin(ctx, ssoStartURL, ssoRegion, ssoSession); loginErr != nil {
+			if loginErr := runSSOLogin(ctx, ssoStartURL, ssoRegion, ssoSession, loginOptions(c)); loginErr != nil {
 				return fmt.Errorf("SSO login failed: %w", loginErr)
 			}
-			token, err = sso.GetTokenForStartURL(ssoStartURL)
+			token, err = getTokenForStartURL(ssoStartURL)
 			if err != nil {
-				token, err = sso.GetLatestToken()
+				token, err = getLatestToken()
 				if err != nil {
 					return fmt.Errorf("failed to get SSO token after login: %w", err)
 				}
