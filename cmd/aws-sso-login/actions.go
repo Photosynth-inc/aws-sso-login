@@ -112,6 +112,11 @@ func handleLogin(ctx context.Context, c *cli.Command) error {
 	// Check if already authenticated (skip when --force is specified)
 	if !c.Bool("force") {
 		if token, err := sso.GetTokenForStartURL(ssoStartURL); err == nil {
+			// Refresh silently when expired but refreshable, so a live session
+			// is reported as authenticated without a browser round-trip.
+			if fresh, refreshErr := sso.EnsureFreshToken(ctx, token); refreshErr == nil {
+				token = fresh
+			}
 			if validateErr := sso.ValidateToken(ctx, token.AccessToken, ssoRegion); validateErr == nil {
 				if opts.JSON {
 					return emitJSON(LoginResult{
@@ -284,6 +289,12 @@ func handleCreds(ctx context.Context, c *cli.Command) error {
 		} else if token.StartURL != startURL {
 			logInfo("Warning: Using token for %s instead of %s", token.StartURL, startURL)
 		}
+	}
+
+	// Silently refresh an expired access token while the refresh token is alive,
+	// so credential_process works headlessly instead of forcing a browser login.
+	if token, err = sso.EnsureFreshToken(ctx, token); err != nil {
+		return fmt.Errorf("failed to refresh SSO token: %w", err)
 	}
 
 	creds, err := sso.GetRoleCredentials(ctx, token.AccessToken, profile.SSOAccountID, profile.SSORoleName, ssoRegion)
@@ -467,6 +478,11 @@ func handleSync(ctx context.Context, c *cli.Command) error {
 		} else {
 			logInfo("Warning: Using token for %s instead of %s", token.StartURL, ssoStartURL)
 		}
+	}
+
+	// Refresh silently if the access token is expired but still refreshable.
+	if token, err = sso.EnsureFreshToken(ctx, token); err != nil {
+		return fmt.Errorf("failed to refresh SSO token: %w", err)
 	}
 
 	logInfo("Using SSO token (expires: %s)", token.ExpiresAt.Format("2006-01-02 15:04:05"))
