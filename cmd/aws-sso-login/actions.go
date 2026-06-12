@@ -112,6 +112,11 @@ func handleLogin(ctx context.Context, c *cli.Command) error {
 	// Check if already authenticated (skip when --force is specified)
 	if !c.Bool("force") {
 		if token, err := sso.GetTokenForStartURL(ssoStartURL); err == nil {
+			// Refresh silently when expired but refreshable, so a live session
+			// is reported as authenticated without a browser round-trip.
+			if fresh, refreshErr := sso.EnsureFreshToken(ctx, token); refreshErr == nil {
+				token = fresh
+			}
 			if validateErr := sso.ValidateToken(ctx, token.AccessToken, ssoRegion); validateErr == nil {
 				if opts.JSON {
 					return emitJSON(LoginResult{
@@ -238,6 +243,42 @@ func handleUse(ctx context.Context, c *cli.Command) error {
 	return nil
 }
 
+// getCachedToken returns the cached token for startURL, falling back to the
+// latest token in the cache when no start-URL-specific entry exists.
+func getCachedToken(startURL string) (*sso.CachedToken, error) {
+	if startURL != "" {
+		if t, err := sso.GetTokenForStartURL(startURL); err == nil {
+			return t, nil
+		}
+	}
+	return sso.GetLatestToken()
+}
+
+// resolveUsableToken returns a valid SSO token for startURL. It refreshes an
+// expired-but-refreshable token silently. When the token is missing or the
+// refresh fails (e.g. the session itself has expired), it falls back to an
+// interactive browser login when interactive is true, otherwise it errors.
+func resolveUsableToken(ctx context.Context, startURL, ssoRegion, ssoSession string, interactive bool) (*sso.CachedToken, error) {
+	if token, err := getCachedToken(startURL); err == nil {
+		if fresh, rErr := sso.EnsureFreshToken(ctx, token); rErr == nil {
+			return fresh, nil
+		}
+		// Token present but cannot be refreshed (no/expired refresh token) — re-login.
+	}
+	if !interactive {
+		return nil, fmt.Errorf("no valid SSO session. Run 'aws-sso-login login' first")
+	}
+	logInfo("No valid SSO session. Starting login...")
+	if loginErr := sso.RunSSOLogin(ctx, startURL, ssoRegion, ssoSession); loginErr != nil {
+		return nil, fmt.Errorf("SSO login failed: %w", loginErr)
+	}
+	token, err := getCachedToken(startURL)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get SSO token after login: %w", err)
+	}
+	return token, nil
+}
+
 // --- creds (scoped temporary credentials) ---
 
 func handleCreds(ctx context.Context, c *cli.Command) error {
@@ -261,29 +302,12 @@ func handleCreds(ctx context.Context, c *cli.Command) error {
 	startURL := cfg.ResolveStartURL(profile)
 	ssoRegion := cfg.ResolveRegion(profile)
 
-	// Resolve SSO token
-	var token *sso.CachedToken
-	token, err = sso.GetTokenForStartURL(startURL)
+	// Resolve a usable SSO token: refresh silently when possible, fall back to
+	// interactive login only when refresh is impossible and a TTY is available.
+	interactive := !opts.JSON && c.String("format") != "json"
+	token, err := resolveUsableToken(ctx, startURL, ssoRegion, profile.SSOSession, interactive)
 	if err != nil {
-		token, err = sso.GetLatestToken()
-		if err != nil {
-			if opts.JSON || c.String("format") == "json" {
-				return fmt.Errorf("no valid SSO session. Run 'aws-sso-login login' first")
-			}
-			logInfo("No valid SSO session. Starting login...")
-			if loginErr := sso.RunSSOLogin(ctx, startURL, ssoRegion, profile.SSOSession); loginErr != nil {
-				return fmt.Errorf("SSO login failed: %w", loginErr)
-			}
-			token, err = sso.GetTokenForStartURL(startURL)
-			if err != nil {
-				token, err = sso.GetLatestToken()
-				if err != nil {
-					return fmt.Errorf("failed to get SSO token after login: %w", err)
-				}
-			}
-		} else if token.StartURL != startURL {
-			logInfo("Warning: Using token for %s instead of %s", token.StartURL, startURL)
-		}
+		return err
 	}
 
 	creds, err := sso.GetRoleCredentials(ctx, token.AccessToken, profile.SSOAccountID, profile.SSORoleName, ssoRegion)
@@ -441,32 +465,11 @@ func handleSync(ctx context.Context, c *cli.Command) error {
 		return fmt.Errorf("--sso-start-url is required (e.g., https://your-domain.awsapps.com/start/)")
 	}
 
-	// Resolve SSO token
-	var token *sso.CachedToken
-	var err error
-
-	token, err = sso.GetTokenForStartURL(ssoStartURL)
+	// Resolve a usable SSO token: refresh silently when possible, fall back to
+	// interactive login only when refresh is impossible (never in --json mode).
+	token, err := resolveUsableToken(ctx, ssoStartURL, ssoRegion, ssoSession, !opts.JSON)
 	if err != nil {
-		token, err = sso.GetLatestToken()
-		if err != nil {
-			// In --json mode, never trigger interactive browser login
-			if opts.JSON {
-				return fmt.Errorf("no valid SSO session found. Run 'aws-sso-login login' first")
-			}
-			logInfo("No valid SSO session found. Starting SSO login...")
-			if loginErr := sso.RunSSOLogin(ctx, ssoStartURL, ssoRegion, ssoSession); loginErr != nil {
-				return fmt.Errorf("SSO login failed: %w", loginErr)
-			}
-			token, err = sso.GetTokenForStartURL(ssoStartURL)
-			if err != nil {
-				token, err = sso.GetLatestToken()
-				if err != nil {
-					return fmt.Errorf("failed to get SSO token after login: %w", err)
-				}
-			}
-		} else {
-			logInfo("Warning: Using token for %s instead of %s", token.StartURL, ssoStartURL)
-		}
+		return err
 	}
 
 	logInfo("Using SSO token (expires: %s)", token.ExpiresAt.Format("2006-01-02 15:04:05"))

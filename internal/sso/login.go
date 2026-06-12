@@ -4,9 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"os"
 	"os/exec"
-	"path/filepath"
 	"time"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
@@ -99,8 +97,20 @@ func RunSSOLogin(ctx context.Context, ssoStartURL, ssoRegion, ssoSession string)
 			return fmt.Errorf("create token failed: %w", err)
 		}
 
-		// Save token to SSO cache (compatible with AWS CLI)
-		if err := saveTokenToCache(aws.ToString(token.AccessToken), int(token.ExpiresIn), ssoStartURL, ssoRegion, ssoSession); err != nil {
+		// Save token to SSO cache (compatible with AWS CLI v2). Persist the
+		// refresh token and client registration so the access token can be
+		// refreshed silently later instead of forcing an interactive re-login.
+		cached := &CachedToken{
+			AccessToken:           aws.ToString(token.AccessToken),
+			RefreshToken:          aws.ToString(token.RefreshToken),
+			ClientID:              aws.ToString(reg.ClientId),
+			ClientSecret:          aws.ToString(reg.ClientSecret),
+			RegistrationExpiresAt: time.Unix(reg.ClientSecretExpiresAt, 0).UTC(),
+			ExpiresAt:             time.Now().Add(time.Duration(token.ExpiresIn) * time.Second),
+			StartURL:              ssoStartURL,
+			Region:                ssoRegion,
+		}
+		if err := saveTokenToCache(cached, ssoSession); err != nil {
 			return fmt.Errorf("failed to save token: %w", err)
 		}
 
@@ -111,20 +121,11 @@ func RunSSOLogin(ctx context.Context, ssoStartURL, ssoRegion, ssoSession string)
 	return fmt.Errorf("authorization timed out. Please try again")
 }
 
-func saveTokenToCache(accessToken string, expiresIn int, startURL, region, ssoSession string) error {
-	expiresAt := time.Now().Add(time.Duration(expiresIn) * time.Second)
-
-	// Build JSON manually to stay compatible with AWS CLI cache format
-	content := fmt.Sprintf(`{
-  "accessToken": %q,
-  "expiresAt": %q,
-  "startUrl": %q,
-  "region": %q
-}`, accessToken, expiresAt.UTC().Format(time.RFC3339), startURL, region)
-
-	// Use the SDK's StandardCachedTokenFilepath to compute the correct path.
-	// sso-session style: sha1(session_name); legacy: sha1(startUrl).
-	cacheKey := startURL
+// saveTokenToCache writes the token to the AWS CLI v2 cache location. The path
+// is derived from the sso-session name (sha1(session_name)) or, for legacy
+// profiles, the start URL (sha1(startUrl)).
+func saveTokenToCache(token *CachedToken, ssoSession string) error {
+	cacheKey := token.StartURL
 	if ssoSession != "" {
 		cacheKey = ssoSession
 	}
@@ -132,11 +133,8 @@ func saveTokenToCache(accessToken string, expiresIn int, startURL, region, ssoSe
 	if err != nil {
 		return fmt.Errorf("failed to determine token cache path: %w", err)
 	}
-
-	if err := os.MkdirAll(filepath.Dir(path), 0700); err != nil {
-		return err
-	}
-	return os.WriteFile(path, []byte(content), 0600)
+	token.FilePath = path
+	return writeTokenCache(token)
 }
 
 func openBrowser(url string) {
